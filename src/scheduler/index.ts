@@ -44,7 +44,11 @@ export class Scheduler {
     await this.heartbeat.start();
 
     // Start Cron
-    this.cron = new CronEngine(commonCallbacks);
+    const cronCallbacks: CronCallbacks = {
+      ...commonCallbacks,
+      isSessionBusy: this.options.isSessionBusy || (() => false),
+    };
+    this.cron = new CronEngine(cronCallbacks);
     this.cron.start(cronConfig.jobs);
 
     console.log('[Scheduler] All engines started');

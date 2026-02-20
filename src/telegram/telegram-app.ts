@@ -250,7 +250,7 @@ export function createTelegramApp(config: TelegramConfig) {
       const recent = getMostRecentSession();
       return recent?.sessionId || null;
     },
-    isSessionBusy: () => false, // Could be enhanced with activity tracking
+    isSessionBusy: (sessionId: string) => sessionManager.isSessionBusy(sessionId),
     notify: (message: string) => {
       sendMessage(message, 'Markdown', { disable_notification: true });
     },

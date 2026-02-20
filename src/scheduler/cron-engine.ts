@@ -13,9 +13,13 @@ interface ScheduledJob {
 
 export interface CronCallbacks {
   getActiveSessionId: () => string | null;
+  isSessionBusy: (sessionId: string) => boolean;
   sendInput: (sessionId: string, text: string) => boolean;
   notify: (message: string) => void;
 }
+
+const RETRY_DELAY_MS = 60_000; // 60 seconds between retries
+const MAX_RETRIES = 3;
 
 export class CronEngine {
   private jobs = new Map<string, ScheduledJob>();
@@ -65,11 +69,23 @@ export class CronEngine {
     }));
   }
 
-  private executeJob(config: CronJobConfig): void {
+  private executeJob(config: CronJobConfig, retryCount = 0): void {
     const sessionId = this.callbacks.getActiveSessionId();
 
     if (!sessionId) {
       console.log(`[Cron] No active session for job '${config.name}' - skipping`);
+      return;
+    }
+
+    // Check if session is busy
+    if (this.callbacks.isSessionBusy(sessionId)) {
+      if (retryCount < MAX_RETRIES) {
+        console.log(`[Cron] Session busy for '${config.name}' - retry ${retryCount + 1}/${MAX_RETRIES} in ${RETRY_DELAY_MS / 1000}s`);
+        setTimeout(() => this.executeJob(config, retryCount + 1), RETRY_DELAY_MS);
+      } else {
+        console.log(`[Cron] Session still busy after ${MAX_RETRIES} retries for '${config.name}' - skipping`);
+        this.callbacks.notify(`Cron: Skipped '${config.name}' - session busy after ${MAX_RETRIES} retries`);
+      }
       return;
     }
 

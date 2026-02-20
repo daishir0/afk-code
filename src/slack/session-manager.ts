@@ -29,6 +29,7 @@ interface InternalSession extends SessionInfo {
   lastTodosHash: string;
   inPlanMode: boolean;
   initialFileStats: Map<string, number>; // path -> mtime at session start
+  lastOutputTime: number; // timestamp of last JSONL output
 }
 
 export interface ChatMessage {
@@ -188,6 +189,17 @@ export class SessionManager {
     }));
   }
 
+  /**
+   * Check if a session is busy (has had JSONL output within the last 30 seconds).
+   * This prevents Heartbeat/Cron from interrupting Claude Code mid-operation.
+   */
+  isSessionBusy(sessionId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+    const elapsed = Date.now() - session.lastOutputTime;
+    return elapsed < 30_000; // Busy if output within last 30 seconds
+  }
+
   private async handleSessionMessage(socket: Socket, message: any): Promise<void> {
     switch (message.type) {
       case 'session_start': {
@@ -207,6 +219,7 @@ export class SessionManager {
           lastTodosHash: '',
           inPlanMode: false,
           initialFileStats,
+          lastOutputTime: Date.now(),
         };
 
         this.sessions.set(message.id, session);
@@ -383,6 +396,7 @@ export class SessionManager {
           const messageTime = new Date(parsed.timestamp);
           if (messageTime < session.startedAt) continue;
 
+          session.lastOutputTime = Date.now();
           this.events.onMessage(session.id, parsed.role, parsed.content);
         }
       }
