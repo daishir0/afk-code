@@ -1,11 +1,15 @@
 import { Bot, Context, InputFile } from 'grammy';
+import { readFile } from 'fs/promises';
+import { homedir } from 'os';
 import type { TelegramConfig } from './types.js';
 import { SessionManager, type SessionInfo } from '../slack/session-manager.js';
 import { chunkMessage, formatTodos } from '../slack/message-formatter.js';
 import { extractImagePaths } from '../utils/image-extractor.js';
+import { Scheduler } from '../scheduler/index.js';
 
 // Telegram has a 4096 character limit per message
 const MAX_MESSAGE_LENGTH = 4000;
+const AFK_CODE_DIR = `${homedir()}/.afk-code`;
 
 interface SessionTracking {
   sessionId: string;
@@ -237,6 +241,21 @@ export function createTelegramApp(config: TelegramConfig) {
     return mostRecent;
   }
 
+  // Initialize Scheduler (Heartbeat + Cron)
+  const scheduler = new Scheduler({
+    sessionManager,
+    getActiveSessionId: () => {
+      const current = getCurrentSession();
+      if (current) return current.sessionId;
+      const recent = getMostRecentSession();
+      return recent?.sessionId || null;
+    },
+    isSessionBusy: () => false, // Could be enhanced with activity tracking
+    notify: (message: string) => {
+      sendMessage(message, 'Markdown', { disable_notification: true });
+    },
+  });
+
   // Handle incoming messages
   bot.on('message:text', async (ctx) => {
     // Only respond to messages from the configured chat
@@ -299,7 +318,8 @@ export function createTelegramApp(config: TelegramConfig) {
       case '/start': {
         await ctx.reply(
           `*AFK Code Telegram Bot*\n\n` +
-            `This bot lets you monitor and interact with Claude Code sessions.\n\n` +
+            `This bot lets you monitor and interact with Claude Code sessions.\n` +
+            `Heartbeat and Cron scheduler are active.\n\n` +
             `Start a session with:\n` +
             `\`afk-code run -- claude\`\n\n` +
             `Type /help for available commands.`,
@@ -412,16 +432,95 @@ export function createTelegramApp(config: TelegramConfig) {
         break;
       }
 
+      // --- OpenClaw integration commands ---
+
+      case '/heartbeat': {
+        const hb = scheduler.getHeartbeat();
+        if (!hb) {
+          await ctx.reply('Heartbeat engine not initialized.');
+          return;
+        }
+
+        const statusLines = [
+          `*Heartbeat Status*`,
+          `Enabled: ${hb.enabled ? 'Yes' : 'No'}`,
+          `Interval: ${hb.intervalMinutes} min`,
+          `Beat count: ${hb.beatCount}`,
+          `Last beat: ${hb.lastBeatTime || 'Never'}`,
+          `Consecutive skips: ${hb.consecutiveSkips}`,
+        ];
+        await ctx.reply(statusLines.join('\n'), { parse_mode: 'Markdown' });
+        break;
+      }
+
+      case '/wakeup': {
+        await ctx.reply('Triggering Heartbeat...');
+        const triggered = await scheduler.triggerHeartbeat();
+        if (!triggered) {
+          await ctx.reply('Failed to trigger Heartbeat. No active session?');
+        }
+        break;
+      }
+
+      case '/cron': {
+        const cronEngine = scheduler.getCron();
+        if (!cronEngine) {
+          await ctx.reply('Cron engine not initialized.');
+          return;
+        }
+
+        const jobs = cronEngine.listJobs();
+        if (jobs.length === 0) {
+          await ctx.reply('No cron jobs configured. Edit `~/.afk-code/cron.yaml` to add jobs.', { parse_mode: 'Markdown' });
+          return;
+        }
+
+        const jobList = jobs
+          .map((j) => `• *${j.name}* (\`${j.schedule}\`) - ${j.enabled ? 'Active' : 'Disabled'}`)
+          .join('\n');
+        await ctx.reply(`*Cron Jobs:*\n${jobList}`, { parse_mode: 'Markdown' });
+        break;
+      }
+
+      case '/memory': {
+        try {
+          const memoryContent = await readFile(`${AFK_CODE_DIR}/MEMORY.md`, 'utf-8');
+          const preview = memoryContent.substring(0, MAX_MESSAGE_LENGTH - 100);
+          await ctx.reply(`*MEMORY.md:*\n\n${preview}`, { parse_mode: 'Markdown' });
+        } catch {
+          await ctx.reply('MEMORY.md not found. Create it at `~/.afk-code/MEMORY.md`', { parse_mode: 'Markdown' });
+        }
+        break;
+      }
+
+      case '/soul': {
+        try {
+          const soulContent = await readFile(`${AFK_CODE_DIR}/SOUL.md`, 'utf-8');
+          const preview = soulContent.substring(0, MAX_MESSAGE_LENGTH - 100);
+          await ctx.reply(`*SOUL.md:*\n\n${preview}`, { parse_mode: 'Markdown' });
+        } catch {
+          await ctx.reply('SOUL.md not found. Create it at `~/.afk-code/SOUL.md`', { parse_mode: 'Markdown' });
+        }
+        break;
+      }
+
       case '/help': {
         await ctx.reply(
           `*AFK Code Commands:*\n\n` +
+            `*Session:*\n` +
             `/sessions - List active sessions\n` +
             `/switch <name> - Switch to a session\n` +
             `/model <name> - Switch model\n` +
             `/compact - Compact conversation\n` +
             `/background - Send Ctrl+B\n` +
             `/interrupt - Send Escape\n` +
-            `/mode - Toggle mode (Shift+Tab)\n` +
+            `/mode - Toggle mode (Shift+Tab)\n\n` +
+            `*Autonomous:*\n` +
+            `/heartbeat - Heartbeat status\n` +
+            `/wakeup - Trigger Heartbeat now\n` +
+            `/cron - List cron jobs\n` +
+            `/memory - Show MEMORY.md\n` +
+            `/soul - Show SOUL.md\n\n` +
             `/help - Show this message\n\n` +
             `_Messages go to the current session (auto-selected if only one)._`,
           { parse_mode: 'Markdown' }
@@ -435,5 +534,5 @@ export function createTelegramApp(config: TelegramConfig) {
     }
   }
 
-  return { bot, sessionManager };
+  return { bot, sessionManager, scheduler };
 }

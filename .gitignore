@@ -3,3 +3,19 @@ dist/
 *.log
 .env
 .env.local
+*.env
+
+# Credentials & secrets
+telegram.env
+discord.env
+slack.env
+*.token
+*.key
+credentials.json
+
+# Runtime state
+scheduler-state.json
+
+# OS files
+.DS_Store
+Thumbs.db

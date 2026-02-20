@@ -141,7 +141,7 @@ export async function telegramRun(): Promise<void> {
     chatId: config.TELEGRAM_CHAT_ID,
   };
 
-  const { bot, sessionManager } = createTelegramApp(telegramConfig);
+  const { bot, sessionManager, scheduler } = createTelegramApp(telegramConfig);
 
   // Start session manager
   try {
@@ -151,10 +151,31 @@ export async function telegramRun(): Promise<void> {
     process.exit(1);
   }
 
+  // Start scheduler (Heartbeat + Cron)
+  try {
+    await scheduler.start();
+  } catch (err) {
+    console.error('[AFK Code] Failed to start scheduler:', err);
+    // Non-fatal - continue without scheduler
+  }
+
+  // Cleanup on exit
+  process.on('SIGINT', () => {
+    scheduler.stop();
+    sessionManager.stop();
+    process.exit(0);
+  });
+  process.on('SIGTERM', () => {
+    scheduler.stop();
+    sessionManager.stop();
+    process.exit(0);
+  });
+
   // Start bot
   bot.start({
     onStart: (botInfo) => {
       console.log(`[AFK Code] Telegram bot @${botInfo.username} is running!`);
+      console.log('[AFK Code] Heartbeat + Cron scheduler active');
       console.log('');
       console.log('Start a Claude Code session with: afk-code run -- claude');
     },

@@ -19,6 +19,7 @@
   },
   "files": [
     "dist",
+    "skills",
     "slack-manifest.json",
     "README.md"
   ],
@@ -40,10 +41,13 @@
     "@slack/bolt": "^4.6.0",
     "discord.js": "^14.25.1",
     "grammy": "^1.35.0",
-    "node-pty": "^1.0.0"
+    "node-cron": "^3.0.3",
+    "node-pty": "^1.0.0",
+    "yaml": "^2.4.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "@types/node-cron": "^3.0.11",
     "tsup": "^8.0.0",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0"

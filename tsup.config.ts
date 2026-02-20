@@ -18,6 +18,8 @@ export default defineConfig({
   external: [
     '@slack/bolt',
     'discord.js',
+    'node-cron',
     'node-pty',
+    'yaml',
   ],
 });

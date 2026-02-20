@@ -2,6 +2,8 @@ import { run } from './run.js';
 import { slackSetup, slackRun } from './slack.js';
 import { discordSetup, discordRun } from './discord.js';
 import { telegramSetup, telegramRun } from './telegram.js';
+import { initFiles } from './init.js';
+import { heartbeatCommand, cronCommand, memoryCommand, statusCommand } from './openclaw-commands.js';
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -52,31 +54,60 @@ async function main() {
       break;
     }
 
+    case 'init': {
+      await initFiles();
+      break;
+    }
+
+    case 'heartbeat': {
+      await heartbeatCommand(args.slice(1));
+      break;
+    }
+
+    case 'cron': {
+      await cronCommand(args.slice(1));
+      break;
+    }
+
+    case 'memory': {
+      await memoryCommand(args.slice(1));
+      break;
+    }
+
+    case 'status': {
+      await statusCommand();
+      break;
+    }
+
     case 'help':
     case '--help':
     case '-h':
     case undefined: {
       console.log(`
-AFK Code - Monitor Claude Code sessions from Slack/Discord/Telegram
+AFK Code - Autonomous AI assistant powered by Claude Code
 
 Commands:
-  telegram           Run the Telegram bot
+  telegram           Run the Telegram bot (with Heartbeat + Cron)
   telegram setup     Configure Telegram integration
   discord            Run the Discord bot
   discord setup      Configure Discord integration
   slack              Run the Slack bot
   slack setup        Configure Slack integration
-  <command> [args]   Start a monitored session
+  run -- <command>   Start a monitored session
+  init               Initialize memory & personality files
+  heartbeat <cmd>    Heartbeat management (status/enable/disable)
+  cron <cmd>         Cron job management (list)
+  memory <cmd>       Memory management (status/list/today)
+  status             Show overall status
   help               Show this help message
 
 Examples:
-  afk-code telegram setup   # First-time Telegram configuration
-  afk-code telegram         # Start the Telegram bot
-  afk-code discord setup    # First-time Discord configuration
-  afk-code discord          # Start the Discord bot
-  afk-code slack setup      # First-time Slack configuration
-  afk-code slack            # Start the Slack bot
-  afk-code claude           # Start a Claude Code session
+  afk-code init              # Initialize ~/.afk-code/ files
+  afk-code telegram setup    # First-time Telegram configuration
+  afk-code telegram          # Start Telegram bot + Heartbeat + Cron
+  afk-code run -- claude     # Start a Claude Code session
+  afk-code heartbeat status  # Check Heartbeat status
+  afk-code status            # Show overall system status
 `);
       break;
     }
