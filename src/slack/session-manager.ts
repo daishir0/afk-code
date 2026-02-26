@@ -69,11 +69,16 @@ function hash(data: string): string {
 export class SessionManager {
   private sessions = new Map<string, InternalSession>();
   private claimedFiles = new Set<string>();
+  private silentMessages = new Set<string>();
   private events: SessionEvents;
   private server: Server | null = null;
 
   constructor(events: SessionEvents) {
     this.events = events;
+  }
+
+  markSilent(content: string): void {
+    this.silentMessages.add(content.trim());
   }
 
   async start(): Promise<void> {
@@ -397,6 +402,16 @@ export class SessionManager {
           if (messageTime < session.startedAt) continue;
 
           session.lastOutputTime = Date.now();
+
+          // Skip silent messages (Heartbeat/Cron prompts marked as silent)
+          if (parsed.role === 'user') {
+            const contentKey = parsed.content.trim();
+            if (this.silentMessages.has(contentKey)) {
+              this.silentMessages.delete(contentKey);
+              continue;
+            }
+          }
+
           this.events.onMessage(session.id, parsed.role, parsed.content);
         }
       }

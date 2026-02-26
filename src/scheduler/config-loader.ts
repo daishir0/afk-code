@@ -17,6 +17,7 @@ export interface HeartbeatConfig {
     end: number;
   };
   max_consecutive_skips: number;
+  silent_relay: boolean;
 }
 
 export interface CronJobConfig {
@@ -25,6 +26,7 @@ export interface CronJobConfig {
   schedule: string;
   prompt: string;
   enabled: boolean;
+  silent_relay: boolean;
 }
 
 export interface CronConfig {
@@ -36,6 +38,7 @@ const DEFAULT_HEARTBEAT_CONFIG: HeartbeatConfig = {
   interval_minutes: 30,
   quiet_hours: { start: 23, end: 7 },
   max_consecutive_skips: 3,
+  silent_relay: true,
 };
 
 const DEFAULT_CRON_CONFIG: CronConfig = {
@@ -57,6 +60,7 @@ export async function loadHeartbeatConfig(): Promise<HeartbeatConfig> {
       },
       max_consecutive_skips:
         data.heartbeat.max_consecutive_skips ?? DEFAULT_HEARTBEAT_CONFIG.max_consecutive_skips,
+      silent_relay: data.heartbeat.silent_relay ?? DEFAULT_HEARTBEAT_CONFIG.silent_relay,
     };
   } catch {
     return DEFAULT_HEARTBEAT_CONFIG;
@@ -76,6 +80,7 @@ export async function loadCronConfig(): Promise<CronConfig> {
         schedule: job.schedule || '0 * * * *',
         prompt: job.prompt || '',
         enabled: job.enabled !== false,
+        silent_relay: job.silent_relay === true,
       })),
     };
   } catch {

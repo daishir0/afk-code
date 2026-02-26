@@ -132,10 +132,6 @@ export function createSlackApp(config: SlackConfig) {
             slackSentMessages.delete(contentKey);
             return;
           }
-          // Skip HEARTBEAT prompts (auto-generated, no need to relay)
-          if (contentKey.startsWith('[HEARTBEAT')) {
-            return;
-          }
 
           // User message from terminal - post as the user (using their name/avatar)
           const chunks = chunkMessage(formatted);

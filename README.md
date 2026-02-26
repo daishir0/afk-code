@@ -93,6 +93,7 @@ heartbeat:
     start: 23
     end: 7
   max_consecutive_skips: 3
+  silent_relay: true      # Don't relay the prompt to messaging apps (default: true)
 ```
 
 **Customize the checklist** (`~/.afk-code/HEARTBEAT.md`):
@@ -124,6 +125,7 @@ jobs:
       2. Important follow-ups from yesterday
       3. Any reminders for today
     enabled: true
+    silent_relay: false    # Relay the prompt to messaging apps (default: false)
 ```
 
 **Cron expression format**:
@@ -422,6 +424,7 @@ heartbeat:
     start: 23    # 23:00〜7:00は静粛
     end: 7
   max_consecutive_skips: 3
+  silent_relay: true       # プロンプトをメッセージアプリに中継しない（デフォルト: true）
 ```
 
 **チェックリストのカスタマイズ** (`~/.afk-code/HEARTBEAT.md`):
@@ -453,6 +456,7 @@ jobs:
       2. 昨日の重要フォローアップ
       3. 今日のリマインダー
     enabled: true
+    silent_relay: false          # プロンプトをメッセージアプリに中継する（デフォルト: false）
 ```
 
 **Cron式の書き方**:

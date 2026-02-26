@@ -86,10 +86,6 @@ export function createDiscordApp(config: DiscordConfig) {
             discordSentMessages.delete(contentKey);
             return;
           }
-          // Skip HEARTBEAT prompts (auto-generated, no need to relay)
-          if (contentKey.startsWith('[HEARTBEAT')) {
-            return;
-          }
 
           // User message from terminal
           const discordChannel = await client.channels.fetch(channel.channelId);

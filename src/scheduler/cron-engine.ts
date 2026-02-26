@@ -16,6 +16,7 @@ export interface CronCallbacks {
   isSessionBusy: (sessionId: string) => boolean;
   sendInput: (sessionId: string, text: string) => boolean;
   notify: (message: string) => void;
+  markSilent?: (content: string) => void;
 }
 
 const RETRY_DELAY_MS = 60_000; // 60 seconds between retries
@@ -94,6 +95,11 @@ export class CronEngine {
     const timeStr = now.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
 
     const prompt = `[CRON: ${config.name}] ${dateStr} ${timeStr}\n\n${config.prompt}`;
+
+    if (config.silent_relay && this.callbacks.markSilent) {
+      this.callbacks.markSilent(prompt);
+    }
+
     const sent = this.callbacks.sendInput(sessionId, prompt);
 
     if (sent) {

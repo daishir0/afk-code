@@ -75,6 +75,7 @@ const FILES: Record<string, string> = {
     start: 23
     end: 7
   max_consecutive_skips: 3
+  silent_relay: true
 `,
   'cron.yaml': `jobs:
   - id: morning-briefing
