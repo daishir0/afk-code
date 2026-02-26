@@ -146,6 +146,10 @@ export function createTelegramApp(config: TelegramConfig) {
           telegramSentMessages.delete(contentKey);
           return;
         }
+        // Skip HEARTBEAT prompts (auto-generated, no need to relay)
+        if (contentKey.startsWith('[HEARTBEAT')) {
+          return;
+        }
         await sendChunkedMessage(content, `_User (terminal):_`, { disable_notification: true });
       } else {
         await sendChunkedMessage(content, `_Claude Code:_`);
