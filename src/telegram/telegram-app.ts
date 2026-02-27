@@ -224,7 +224,12 @@ export function createTelegramApp(config: TelegramConfig) {
   function getSessionByName(name: string): SessionTracking | null {
     const nameLower = name.toLowerCase();
     for (const tracking of activeSessions.values()) {
-      if (tracking.sessionName.toLowerCase().startsWith(nameLower)) {
+      const displayName = `${tracking.projectName}/${tracking.sessionName}`.toLowerCase();
+      if (
+        tracking.sessionName.toLowerCase().startsWith(nameLower) ||
+        tracking.projectName.toLowerCase().startsWith(nameLower) ||
+        displayName.startsWith(nameLower)
+      ) {
         return tracking;
       }
     }
@@ -278,7 +283,7 @@ export function createTelegramApp(config: TelegramConfig) {
       } else {
         // Multiple sessions, need to select one
         const list = Array.from(activeSessions.values())
-          .map((s) => `• \`${s.sessionName}\``)
+          .map((s) => `• \`${s.projectName}/${s.sessionName}\``)
           .join('\n');
         await ctx.reply(
           `Multiple sessions active. Select one first:\n\n${list}\n\nUse: \`/switch <name>\``,
