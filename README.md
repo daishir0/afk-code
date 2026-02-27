@@ -263,7 +263,7 @@ afk-code help               Show help
 | Command | Description |
 |---------|-------------|
 | `/sessions` | List active sessions |
-| `/switch <name>` | Switch session |
+| `/switch <name>` | Switch session (by project name or session name) |
 | `/model <name>` | Switch model (opus/sonnet/haiku) |
 | `/compact` | Compact conversation |
 | `/background` | Send Ctrl+B |
@@ -286,26 +286,52 @@ afk-code help               Show help
 | Permissions | Personal | Personal | Admin |
 | Image support | Yes | Yes | Yes |
 
+## Multi-Session
+
+Run multiple Claude Code sessions in different project directories and switch between them from Telegram.
+
+```bash
+cd ~/project-a
+afk                  # Starts Telegram bot + session "project-a"
+
+cd ~/project-b
+afk                  # Adds session "project-b" (bot already running)
+```
+
+From Telegram:
+
+```
+/sessions            → Lists: project-a, project-b
+/switch project-b    → Switches to project-b
+```
+
+Messages you send go to the currently selected session. If only one session is active, it is auto-selected.
+
 ## tmux Shortcut
 
-Add to `~/.zshrc`:
+Add to `~/.zshrc` (or `~/.bashrc`):
 
 ```bash
 afk() {
     source ~/.nvm/nvm.sh
-    if tmux has-session -t afk-bot 2>/dev/null; then
-        echo "afk-bot is already running. Use: tmux attach -t afk-bot"
-        return 0
+    local dir="$(pwd)"
+    local name="$(basename "$dir")"
+
+    # Start Telegram bot if not running
+    if ! tmux has-session -t afk 2>/dev/null; then
+        tmux new-session -d -s afk -n telegram 'source ~/.nvm/nvm.sh && afk-code telegram'
+        sleep 2
+        echo "Telegram bot started"
     fi
-    tmux new-session -d -s afk-bot 'source ~/.nvm/nvm.sh && afk-code telegram'
-    sleep 2
-    tmux split-window -t afk-bot \
-        "cd ~ && source ~/.nvm/nvm.sh && afk-code run -- claude --dangerously-skip-permissions"
-    echo "AFK Code launched! Send messages from Telegram."
-    echo "Heartbeat: autonomous check-ins every 30 min"
-    echo "Check: tmux attach -t afk-bot"
+
+    # Add a Claude Code session in the current directory
+    tmux new-window -t afk -n "$name" \
+        "cd '$dir' && source ~/.nvm/nvm.sh && afk-code run -- claude --dangerously-skip-permissions"
+    echo "Session '$name' added. Check: tmux attach -t afk"
 }
 ```
+
+Each `afk` call adds a new tmux window (tab) for the current directory. The Telegram bot runs once and all sessions connect to it.
 
 ## Limitations
 
@@ -596,7 +622,7 @@ afk-code help               ヘルプ表示
 | コマンド | 説明 |
 |---------|------|
 | `/sessions` | アクティブセッション一覧 |
-| `/switch <name>` | セッション切り替え |
+| `/switch <name>` | セッション切り替え（プロジェクト名またはセッション名で指定） |
 | `/model <name>` | モデル切り替え (opus/sonnet/haiku) |
 | `/compact` | 会話をコンパクト化 |
 | `/background` | Ctrl+B 送信 |
@@ -619,26 +645,52 @@ afk-code help               ヘルプ表示
 | 権限 | 個人 | 個人 | 管理者 |
 | 画像対応 | 対応 | 対応 | 対応 |
 
+## マルチセッション
+
+異なるプロジェクトディレクトリで複数の Claude Code セッションを起動し、Telegram から切り替えて操作できます。
+
+```bash
+cd ~/project-a
+afk                  # → Telegram ボット起動 + セッション "project-a"
+
+cd ~/project-b
+afk                  # → セッション "project-b" 追加（ボットはそのまま）
+```
+
+Telegram から:
+
+```
+/sessions            → 一覧: project-a, project-b
+/switch project-b    → project-b に切り替え
+```
+
+メッセージは現在選択中のセッションに送信されます。セッションが1つだけの場合は自動選択されます。
+
 ## tmux ショートカット
 
-`~/.zshrc` に追加:
+`~/.zshrc`（または `~/.bashrc`）に追加:
 
 ```bash
 afk() {
     source ~/.nvm/nvm.sh
-    if tmux has-session -t afk-bot 2>/dev/null; then
-        echo "afk-bot は既に起動中です。確認: tmux attach -t afk-bot"
-        return 0
+    local dir="$(pwd)"
+    local name="$(basename "$dir")"
+
+    # Telegram ボットが未起動なら起動
+    if ! tmux has-session -t afk 2>/dev/null; then
+        tmux new-session -d -s afk -n telegram 'source ~/.nvm/nvm.sh && afk-code telegram'
+        sleep 2
+        echo "Telegram bot 起動"
     fi
-    tmux new-session -d -s afk-bot 'source ~/.nvm/nvm.sh && afk-code telegram'
-    sleep 2
-    tmux split-window -t afk-bot \
-        "cd ~ && source ~/.nvm/nvm.sh && afk-code run -- claude --dangerously-skip-permissions"
-    echo "AFK Code 起動完了！ Telegram からメッセージを送れます"
-    echo "Heartbeat: 30分間隔で自律チェック稼働中"
-    echo "確認: tmux attach -t afk-bot"
+
+    # カレントディレクトリで Claude Code セッションを追加
+    tmux new-window -t afk -n "$name" \
+        "cd '$dir' && source ~/.nvm/nvm.sh && afk-code run -- claude --dangerously-skip-permissions"
+    echo "セッション '$name' 追加。確認: tmux attach -t afk"
 }
 ```
+
+`afk` を実行するたびに、カレントディレクトリ用の tmux ウィンドウ（タブ）が追加されます。Telegram ボットは1つだけ起動し、全セッションがそこに接続されます。
 
 ## 制限事項
 
