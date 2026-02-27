@@ -222,8 +222,16 @@ export function createTelegramApp(config: TelegramConfig) {
   }
 
   function getSessionByName(name: string): SessionTracking | null {
+    const sessions = Array.from(activeSessions.values());
+
+    // Support numeric index (1-based)
+    const num = parseInt(name, 10);
+    if (!isNaN(num) && num >= 1 && num <= sessions.length) {
+      return sessions[num - 1];
+    }
+
     const nameLower = name.toLowerCase();
-    for (const tracking of activeSessions.values()) {
+    for (const tracking of sessions) {
       const displayName = `${tracking.projectName}/${tracking.sessionName}`.toLowerCase();
       if (
         tracking.sessionName.toLowerCase().startsWith(nameLower) ||
@@ -283,10 +291,10 @@ export function createTelegramApp(config: TelegramConfig) {
       } else {
         // Multiple sessions, need to select one
         const list = Array.from(activeSessions.values())
-          .map((s) => `• \`${s.projectName}/${s.sessionName}\``)
+          .map((s, i) => `${i + 1}: \`${s.projectName}/${s.sessionName}\``)
           .join('\n');
         await ctx.reply(
-          `Multiple sessions active. Select one first:\n\n${list}\n\nUse: \`/switch <name>\``,
+          `Multiple sessions active. Select one first:\n\n${list}\n\nUse: \`/switch <number or name>\``,
           { parse_mode: 'Markdown' }
         );
       }
@@ -341,14 +349,14 @@ export function createTelegramApp(config: TelegramConfig) {
 
         const current = getCurrentSession();
         const list = Array.from(activeSessions.values())
-          .map((s) => {
+          .map((s, i) => {
             const isCurrent = current && s.sessionId === current.sessionId;
             const displayName = `${s.projectName}/${s.sessionName}`;
-            return isCurrent ? `• *${displayName}* ← current` : `• ${displayName}`;
+            return isCurrent ? `${i + 1}: *${displayName}* ← current` : `${i + 1}: ${displayName}`;
           })
           .join('\n');
 
-        await ctx.reply(`*Active Sessions:*\n${list}\n\nUse \`/switch <name>\` to change`, { parse_mode: 'Markdown' });
+        await ctx.reply(`*Active Sessions:*\n${list}\n\nUse \`/switch <number or name>\` to change`, { parse_mode: 'Markdown' });
         break;
       }
 
@@ -361,19 +369,19 @@ export function createTelegramApp(config: TelegramConfig) {
           }
           const current = getCurrentSession();
           const list = Array.from(activeSessions.values())
-            .map((s) => {
+            .map((s, i) => {
               const isCurrent = current && s.sessionId === current.sessionId;
               const displayName = `${s.projectName}/${s.sessionName}`;
-              return isCurrent ? `• *${displayName}* ← current` : `• ${displayName}`;
+              return isCurrent ? `${i + 1}: *${displayName}* ← current` : `${i + 1}: ${displayName}`;
             })
             .join('\n');
-          await ctx.reply(`*Sessions:*\n${list}\n\nUse: \`/switch <name>\``, { parse_mode: 'Markdown' });
+          await ctx.reply(`*Sessions:*\n${list}\n\nUse: \`/switch <number or name>\``, { parse_mode: 'Markdown' });
           return;
         }
         const session = getSessionByName(sessionArg);
         if (session) {
           currentSessionId = session.sessionId;
-          await ctx.reply(`Switched to: *${session.sessionName}*`, { parse_mode: 'Markdown' });
+          await ctx.reply(`Switched to: *${session.projectName}/${session.sessionName}*`, { parse_mode: 'Markdown' });
         } else {
           await ctx.reply(`Session not found: ${sessionArg}`);
         }
