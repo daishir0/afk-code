@@ -404,10 +404,19 @@ export class SessionManager {
           session.lastOutputTime = Date.now();
 
           // Skip silent messages (Heartbeat/Cron prompts marked as silent)
+          // Use startsWith instead of exact match because Claude Code
+          // appends <system-reminder> tags to user messages in JSONL
           if (parsed.role === 'user') {
             const contentKey = parsed.content.trim();
-            if (this.silentMessages.has(contentKey)) {
-              this.silentMessages.delete(contentKey);
+            let matchedSilent: string | null = null;
+            for (const silent of this.silentMessages) {
+              if (contentKey.startsWith(silent)) {
+                matchedSilent = silent;
+                break;
+              }
+            }
+            if (matchedSilent) {
+              this.silentMessages.delete(matchedSilent);
               continue;
             }
           }
