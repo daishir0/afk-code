@@ -30,6 +30,7 @@ export function createTelegramApp(config: TelegramConfig) {
   const telegramSentMessages = new Set<string>();
   let currentSessionId: string | null = null; // Explicitly selected session
   let primarySessionId: string | null = null; // First session started (Heartbeat/Cron target)
+  let pendingSwitchProject: string | null = null; // Project name awaiting session start
 
   // Message queue for rate limiting (Telegram allows ~30 msg/sec but be conservative)
   const messageQueue: Array<() => Promise<void>> = [];
@@ -117,6 +118,12 @@ export function createTelegramApp(config: TelegramConfig) {
         primarySessionId = session.id;
       }
 
+      // Auto-switch to session if it was requested via /switch
+      if (pendingSwitchProject && projectName === pendingSwitchProject) {
+        currentSessionId = session.id;
+        pendingSwitchProject = null;
+      }
+
       // Format display: strip verbose flags for cleaner display
       const HIDDEN_FLAGS = ['--dangerously-skip-permissions'];
       const parts = session.name.split(' ');
@@ -178,9 +185,7 @@ export function createTelegramApp(config: TelegramConfig) {
           telegramSentMessages.delete(contentKey);
           return;
         }
-        const userPrefix = activeSessions.size > 1
-          ? `_User (${tracking.projectName}):_`
-          : `_User (terminal):_`;
+        const userPrefix = `_User (${tracking.projectName}):_`;
         await sendChunkedMessage(content, userPrefix, { disable_notification: true });
       } else {
         await sendChunkedMessage(content, getSessionPrefix(sessionId));
@@ -284,9 +289,8 @@ export function createTelegramApp(config: TelegramConfig) {
     }
   }
 
-  // Get session prefix for messages (project name based)
+  // Get session prefix for messages (always show project name)
   function getSessionPrefix(sessionId: string): string {
-    if (activeSessions.size <= 1) return '_Claude Code:_';
     const tracking = activeSessions.get(sessionId);
     const name = tracking?.projectName || 'unknown';
     return `_Claude Code (${name}):_`;
@@ -449,7 +453,8 @@ export function createTelegramApp(config: TelegramConfig) {
           return;
         }
 
-        const continueFlag = args.includes('--continue') || args.includes('--resume');
+        const newFlag = args.includes('--new');
+        const continueFlag = !newFlag; // Default: continue. --new for fresh session
         const projectName = args.filter(a => !a.startsWith('--'))[0];
 
         // Check if already running
@@ -479,9 +484,11 @@ export function createTelegramApp(config: TelegramConfig) {
 
         await ensureTmuxSession();
 
-        await ctx.reply(`Starting \`${projectName}\`...${continueFlag ? ' (continue)' : ''}`, { parse_mode: 'Markdown' });
+        pendingSwitchProject = projectName;
+        await ctx.reply(`Starting \`${projectName}\`...${newFlag ? ' (new)' : ' (continue)'}`, { parse_mode: 'Markdown' });
         const result = await createSessionInTmux(projectName, projectDir, continueFlag);
         if (!result.ok) {
+          pendingSwitchProject = null;
           await ctx.reply(`Failed: ${result.error}`);
         }
         break;
