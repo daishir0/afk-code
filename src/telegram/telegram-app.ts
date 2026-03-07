@@ -28,6 +28,14 @@ export function createTelegramApp(config: TelegramConfig) {
 
   const activeSessions = new Map<string, SessionTracking>();
   const telegramSentMessages = new Set<string>();
+
+  // Per-session message buffer for cross-project context
+  const sessionMessageBuffers = new Map<string, Array<{
+    role: 'user' | 'assistant';
+    content: string;
+    timestamp: Date;
+  }>>();
+  const MESSAGE_BUFFER_SIZE = 10;
   let currentSessionId: string | null = null; // Explicitly selected session
   let primarySessionId: string | null = null; // First session started (Heartbeat/Cron target)
   let pendingSwitchProject: string | null = null; // Project name awaiting session start
@@ -144,6 +152,7 @@ export function createTelegramApp(config: TelegramConfig) {
       const projectName = tracking?.projectName || sessionId;
 
       activeSessions.delete(sessionId);
+      sessionMessageBuffers.delete(sessionId);
 
       // If primary session ended, clear it
       if (primarySessionId === sessionId) {
@@ -178,6 +187,16 @@ export function createTelegramApp(config: TelegramConfig) {
       if (!tracking) return;
 
       tracking.lastActivity = new Date();
+
+      // Buffer message for cross-project context
+      if (!sessionMessageBuffers.has(sessionId)) {
+        sessionMessageBuffers.set(sessionId, []);
+      }
+      const buffer = sessionMessageBuffers.get(sessionId)!;
+      buffer.push({ role, content, timestamp: new Date() });
+      if (buffer.length > MESSAGE_BUFFER_SIZE) {
+        buffer.splice(0, buffer.length - MESSAGE_BUFFER_SIZE);
+      }
 
       if (role === 'user') {
         const contentKey = content.trim();
@@ -296,6 +315,26 @@ export function createTelegramApp(config: TelegramConfig) {
     return `_Claude Code (${name}):_`;
   }
 
+  function getOtherSessionsSummary(excludeSessionId: string): string {
+    const summaries: string[] = [];
+    for (const [sessionId, messages] of sessionMessageBuffers.entries()) {
+      if (sessionId === excludeSessionId || messages.length === 0) continue;
+      const tracking = activeSessions.get(sessionId);
+      if (!tracking) continue;
+      const projectName = tracking.projectName;
+      const recent = messages.slice(-5).map(m => {
+        const role = m.role === 'user' ? 'User' : 'Claude';
+        const truncated = m.content.length > 200
+          ? m.content.substring(0, 200) + '...'
+          : m.content;
+        return `  ${role}: ${truncated}`;
+      }).join('\n');
+      summaries.push(`[${projectName}]\n${recent}`);
+    }
+    if (summaries.length === 0) return '';
+    return '\n---\n他のアクティブプロジェクトの最近のやりとり:\n' + summaries.join('\n\n');
+  }
+
   function getCurrentSession(): SessionTracking | null {
     // If explicit session selected, use it
     if (currentSessionId) {
@@ -373,6 +412,8 @@ export function createTelegramApp(config: TelegramConfig) {
     notify: (message: string) => {
       sendMessage(message, 'Markdown', { disable_notification: true });
     },
+    getOtherSessionsSummary: (excludeSessionId: string) =>
+      getOtherSessionsSummary(excludeSessionId),
   });
 
   // Handle incoming messages

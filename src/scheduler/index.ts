@@ -13,6 +13,7 @@ export interface SchedulerOptions {
   getActiveSessionId: () => string | null;
   isSessionBusy?: (sessionId: string) => boolean;
   notify: (message: string) => void;
+  getOtherSessionsSummary?: (excludeSessionId: string) => string;
 }
 
 export class Scheduler {
@@ -35,6 +36,7 @@ export class Scheduler {
       notify: this.options.notify,
       markSilent: (content: string) =>
         this.options.sessionManager.markSilent(content),
+      getOtherSessionsSummary: this.options.getOtherSessionsSummary,
     };
 
     // Start Heartbeat

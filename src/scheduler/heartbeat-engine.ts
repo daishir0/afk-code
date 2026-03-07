@@ -22,6 +22,7 @@ export interface HeartbeatCallbacks {
   sendInput: (sessionId: string, text: string) => boolean;
   notify: (message: string) => void;
   markSilent?: (content: string) => void;
+  getOtherSessionsSummary?: (excludeSessionId: string) => string;
 }
 
 export class HeartbeatEngine {
@@ -133,7 +134,7 @@ export class HeartbeatEngine {
     }
 
     // Build and send heartbeat prompt
-    const prompt = await this.buildHeartbeatPrompt();
+    const prompt = await this.buildHeartbeatPrompt(sessionId);
 
     if (this.config.silent_relay && this.callbacks.markSilent) {
       this.callbacks.markSilent(prompt);
@@ -155,7 +156,7 @@ export class HeartbeatEngine {
     return sent;
   }
 
-  private async buildHeartbeatPrompt(): Promise<string> {
+  private async buildHeartbeatPrompt(sessionId: string): Promise<string> {
     const now = new Date();
     const dateStr = now.toISOString().split('T')[0];
     const timeStr = now.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
@@ -168,6 +169,14 @@ export class HeartbeatEngine {
       '',
       '報告は最小限に。特記事項がなければ「Heartbeat完了、特記事項なし」のみ。',
     ];
+
+    // Append cross-project context if available
+    if (this.callbacks.getOtherSessionsSummary) {
+      const otherContext = this.callbacks.getOtherSessionsSummary(sessionId);
+      if (otherContext) {
+        lines.push(otherContext);
+      }
+    }
 
     return lines.join('\n');
   }
