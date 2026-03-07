@@ -149,6 +149,7 @@ Inspired by OpenClaw's memory system.
 +-- SOUL.md            # AI personality and values
 +-- HEARTBEAT.md       # Heartbeat checklist
 +-- MEMORY.md          # Long-term curated memory
++-- projects.yaml      # Registered project directories
 +-- scheduler.yaml     # Heartbeat configuration
 +-- cron.yaml          # Cron job definitions
 +-- memory/            # Daily notes
@@ -161,6 +162,7 @@ Inspired by OpenClaw's memory system.
 | `SOUL.md` | Defines the AI's personality, values, and behavior |
 | `HEARTBEAT.md` | Checklist for autonomous Heartbeat actions |
 | `MEMORY.md` | Long-term memory, curated from daily notes |
+| `projects.yaml` | Whitelisted project directories for remote session creation |
 | `memory/YYYY-MM-DD.md` | Daily activity log |
 
 ## Skills (50+)
@@ -262,8 +264,9 @@ afk-code help               Show help
 
 | Command | Description |
 |---------|-------------|
-| `/sessions` | List active sessions |
-| `/switch <name>` | Switch session (by project name or session name) |
+| `/switch <project>` | Switch to project (starts it if not running) |
+| `/switch` | List all projects with status |
+| `/projects` | Alias for `/switch` |
 | `/model <name>` | Switch model (opus/sonnet/haiku) |
 | `/compact` | Compact conversation |
 | `/background` | Send Ctrl+B |
@@ -288,24 +291,25 @@ afk-code help               Show help
 
 ## Multi-Session
 
-Run multiple Claude Code sessions in different project directories and switch between them from Telegram.
+Register project directories in `~/.afk-code/projects.yaml` and start/switch sessions from Telegram.
 
-```bash
-cd ~/project-a
-afk                  # Starts Telegram bot + session "project-a"
-
-cd ~/project-b
-afk                  # Adds session "project-b" (bot already running)
+```yaml
+# ~/.afk-code/projects.yaml
+projects:
+  my-app: ~/my-app
+  website: ~/website
 ```
 
 From Telegram:
 
 ```
-/sessions            → Lists: project-a, project-b
-/switch project-b    → Switches to project-b
+/switch              → Lists projects: 🟢 my-app ⭐, ⚪ website
+/switch website      → Starts session in ~/website (if not running) or switches to it
+/projects            → Alias for /switch
 ```
 
-Messages you send go to the currently selected session. If only one session is active, it is auto-selected.
+- The first session started becomes the **primary session** (⭐), which Heartbeat/Cron always targets.
+- Messages go to the currently selected session. If only one session is active, it is auto-selected.
 
 ## tmux Shortcut
 
@@ -314,24 +318,30 @@ Add to `~/.zshrc` (or `~/.bashrc`):
 ```bash
 afk() {
     source ~/.nvm/nvm.sh
-    local dir="$(pwd)"
-    local name="$(basename "$dir")"
 
-    # Start Telegram bot if not running
-    if ! tmux has-session -t afk 2>/dev/null; then
-        tmux new-session -d -s afk -n telegram 'source ~/.nvm/nvm.sh && afk-code telegram'
-        sleep 2
-        echo "Telegram bot started"
+    # Read first project from projects.yaml
+    local config="$HOME/.afk-code/projects.yaml"
+    if [[ ! -f "$config" ]]; then echo "Error: $config not found"; return 1; fi
+    local name dir
+    name=$(grep -A1 '^projects:' "$config" | tail -1 | sed 's/^ *//' | cut -d: -f1)
+    dir=$(grep -A1 '^projects:' "$config" | tail -1 | sed 's/^ *//' | cut -d: -f2 | sed 's/^ *//' | sed "s|~|$HOME|")
+
+    # Kill existing afk session and restart
+    if tmux has-session -t afk 2>/dev/null; then
+        tmux kill-session -t afk
+        sleep 1
     fi
 
-    # Add a Claude Code session in the current directory
+    # Start Telegram bot + first project session
+    tmux new-session -d -s afk -n telegram 'source ~/.nvm/nvm.sh && afk-code telegram'
+    sleep 2
     tmux new-window -t afk -n "$name" \
         "cd '$dir' && source ~/.nvm/nvm.sh && afk-code run -- claude --dangerously-skip-permissions"
-    echo "Session '$name' added. Check: tmux attach -t afk"
+    echo "Session '$name' started. Check: tmux attach -t afk"
 }
 ```
 
-Each `afk` call adds a new tmux window (tab) for the current directory. The Telegram bot runs once and all sessions connect to it.
+`afk` starts the Telegram bot and the first project from `projects.yaml`. Additional sessions can be started from Telegram with `/switch <project>`.
 
 ## Limitations
 
@@ -508,6 +518,7 @@ OpenClaw のメモリシステムにインスパイアされた永続記憶機�
 +-- SOUL.md            # パーソナリティ定義
 +-- HEARTBEAT.md       # Heartbeat チェックリスト
 +-- MEMORY.md          # 長期記憶（キュレーション済み）
++-- projects.yaml      # 登録プロジェクトディレクトリ
 +-- scheduler.yaml     # Heartbeat 設定
 +-- cron.yaml          # Cron ジョブ定義
 +-- memory/            # 日次ノート
@@ -520,6 +531,7 @@ OpenClaw のメモリシステムにインスパイアされた永続記憶機�
 | `SOUL.md` | AIの「魂」。人格・振る舞い・価値観を定義 |
 | `HEARTBEAT.md` | Heartbeat 時のチェックリスト |
 | `MEMORY.md` | 長期記憶。重要な情報をキュレーション |
+| `projects.yaml` | リモートセッション作成用のプロジェクトホワイトリスト |
 | `memory/YYYY-MM-DD.md` | 日次ノート。その日の活動ログ |
 
 ## スキル (50+)
@@ -621,8 +633,9 @@ afk-code help               ヘルプ表示
 
 | コマンド | 説明 |
 |---------|------|
-| `/sessions` | アクティブセッション一覧 |
-| `/switch <name>` | セッション切り替え（プロジェクト名またはセッション名で指定） |
+| `/switch <project>` | プロジェクトに切り替え（未起動なら起動） |
+| `/switch` | プロジェクト一覧（状態表示付き） |
+| `/projects` | `/switch` のエイリアス |
 | `/model <name>` | モデル切り替え (opus/sonnet/haiku) |
 | `/compact` | 会話をコンパクト化 |
 | `/background` | Ctrl+B 送信 |
@@ -647,24 +660,25 @@ afk-code help               ヘルプ表示
 
 ## マルチセッション
 
-異なるプロジェクトディレクトリで複数の Claude Code セッションを起動し、Telegram から切り替えて操作できます。
+`~/.afk-code/projects.yaml` にプロジェクトを登録し、Telegram からセッションを起動・切り替えできます。
 
-```bash
-cd ~/project-a
-afk                  # → Telegram ボット起動 + セッション "project-a"
-
-cd ~/project-b
-afk                  # → セッション "project-b" 追加（ボットはそのまま）
+```yaml
+# ~/.afk-code/projects.yaml
+projects:
+  my-app: ~/my-app
+  website: ~/website
 ```
 
 Telegram から:
 
 ```
-/sessions            → 一覧: project-a, project-b
-/switch project-b    → project-b に切り替え
+/switch              → プロジェクト一覧: 🟢 my-app ⭐, ⚪ website
+/switch website      → ~/website でセッション起動（起動済みなら切り替え）
+/projects            → /switch のエイリアス
 ```
 
-メッセージは現在選択中のセッションに送信されます。セッションが1つだけの場合は自動選択されます。
+- 最初に起動したセッションが**プライマリセッション**（⭐）となり、Heartbeat/Cron は常にそこへ送信されます。
+- メッセージは現在選択中のセッションに送信されます。セッションが1つだけの場合は自動選択されます。
 
 ## tmux ショートカット
 
@@ -673,24 +687,30 @@ Telegram から:
 ```bash
 afk() {
     source ~/.nvm/nvm.sh
-    local dir="$(pwd)"
-    local name="$(basename "$dir")"
 
-    # Telegram ボットが未起動なら起動
-    if ! tmux has-session -t afk 2>/dev/null; then
-        tmux new-session -d -s afk -n telegram 'source ~/.nvm/nvm.sh && afk-code telegram'
-        sleep 2
-        echo "Telegram bot 起動"
+    # projects.yaml から最初のプロジェクトを取得
+    local config="$HOME/.afk-code/projects.yaml"
+    if [[ ! -f "$config" ]]; then echo "Error: $config not found"; return 1; fi
+    local name dir
+    name=$(grep -A1 '^projects:' "$config" | tail -1 | sed 's/^ *//' | cut -d: -f1)
+    dir=$(grep -A1 '^projects:' "$config" | tail -1 | sed 's/^ *//' | cut -d: -f2 | sed 's/^ *//' | sed "s|~|$HOME|")
+
+    # 既存のafkセッションがあれば削除して再起動
+    if tmux has-session -t afk 2>/dev/null; then
+        tmux kill-session -t afk
+        sleep 1
     fi
 
-    # カレントディレクトリで Claude Code セッションを追加
+    # Telegram ボット + 最初のプロジェクトで起動
+    tmux new-session -d -s afk -n telegram 'source ~/.nvm/nvm.sh && afk-code telegram'
+    sleep 2
     tmux new-window -t afk -n "$name" \
         "cd '$dir' && source ~/.nvm/nvm.sh && afk-code run -- claude --dangerously-skip-permissions"
-    echo "セッション '$name' 追加。確認: tmux attach -t afk"
+    echo "セッション '$name' 起動。確認: tmux attach -t afk"
 }
 ```
 
-`afk` を実行するたびに、カレントディレクトリ用の tmux ウィンドウ（タブ）が追加されます。Telegram ボットは1つだけ起動し、全セッションがそこに接続されます。
+`afk` で Telegram ボットと `projects.yaml` の最初のプロジェクトが起動します。追加セッションは Telegram から `/switch <project>` で起動できます。
 
 ## 制限事項
 

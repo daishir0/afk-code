@@ -398,8 +398,6 @@ export function createTelegramApp(config: TelegramConfig) {
     if (!sent) {
       telegramSentMessages.delete(text.trim());
       await ctx.reply('Failed to send input - session not connected.');
-    } else if (activeSessions.size > 1) {
-      await ctx.reply(`→ ${current.projectName}`, { parse_mode: 'Markdown', disable_notification: true } as any);
     }
   });
 
