@@ -1,11 +1,16 @@
 import { Bot, Context, InputFile } from 'grammy';
-import { readFile } from 'fs/promises';
+import { readFile, stat } from 'fs/promises';
 import { homedir } from 'os';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import { parse as parseYaml } from 'yaml';
 import type { TelegramConfig } from './types.js';
 import { SessionManager, type SessionInfo } from '../slack/session-manager.js';
 import { chunkMessage, formatTodos } from '../slack/message-formatter.js';
 import { extractImagePaths } from '../utils/image-extractor.js';
 import { Scheduler } from '../scheduler/index.js';
+
+const execAsync = promisify(exec);
 
 // Telegram has a 4096 character limit per message
 const MAX_MESSAGE_LENGTH = 4000;
@@ -24,6 +29,7 @@ export function createTelegramApp(config: TelegramConfig) {
   const activeSessions = new Map<string, SessionTracking>();
   const telegramSentMessages = new Set<string>();
   let currentSessionId: string | null = null; // Explicitly selected session
+  let primarySessionId: string | null = null; // First session started (Heartbeat/Cron target)
 
   // Message queue for rate limiting (Telegram allows ~30 msg/sec but be conservative)
   const messageQueue: Array<() => Promise<void>> = [];
@@ -90,8 +96,15 @@ export function createTelegramApp(config: TelegramConfig) {
   // Create session manager with Telegram event handlers
   const sessionManager = new SessionManager({
     onSessionStart: async (session) => {
-      // Extract project name from working directory for better session identification
-      const projectName = session.cwd.split('/').filter(Boolean).pop() || 'unknown';
+      // Match cwd against projects.yaml for accurate project name
+      const projects = await loadProjects();
+      let projectName = session.cwd.split('/').filter(Boolean).pop() || 'unknown';
+      for (const [name, path] of projects.entries()) {
+        if (session.cwd === path || session.cwd.startsWith(path + '/')) {
+          projectName = name;
+          break;
+        }
+      }
       activeSessions.set(session.id, {
         sessionId: session.id,
         sessionName: session.name,
@@ -99,24 +112,43 @@ export function createTelegramApp(config: TelegramConfig) {
         lastActivity: new Date(),
       });
 
-      // Format command name: "claude --foo --bar" → "claude (foo, bar)"
+      // First session becomes primary (Heartbeat/Cron target)
+      if (!primarySessionId) {
+        primarySessionId = session.id;
+      }
+
+      // Format display: strip verbose flags for cleaner display
+      const HIDDEN_FLAGS = ['--dangerously-skip-permissions'];
       const parts = session.name.split(' ');
       const cmd = parts[0];
-      const args = parts.slice(1).map((a) => a.replace(/^-+/, ''));
-      const sessionLabel = args.length > 0 ? `${cmd} (${args.join(', ')})` : cmd;
+      const visibleArgs = parts.slice(1).filter(a => !HIDDEN_FLAGS.includes(a));
+      const sessionLabel = visibleArgs.length > 0
+        ? `${cmd} (${visibleArgs.map(a => a.replace(/^-+/, '')).join(', ')})`
+        : cmd;
 
+      const isPrimary = session.id === primarySessionId ? ' ⭐' : '';
       await sendMessage(
-        `Session started: ${sessionLabel}\n` + `Directory: \`${session.cwd}\``
+        `Session started: ${projectName}/${sessionLabel}${isPrimary}\n` + `Directory: \`${session.cwd}\``
       );
     },
 
     onSessionEnd: async (sessionId) => {
       const tracking = activeSessions.get(sessionId);
-      const name = tracking?.sessionName || sessionId;
+      const projectName = tracking?.projectName || sessionId;
 
       activeSessions.delete(sessionId);
 
-      await sendMessage(`Session ended: ${name}`);
+      // If primary session ended, clear it
+      if (primarySessionId === sessionId) {
+        primarySessionId = null;
+      }
+
+      // If current session ended, clear it
+      if (currentSessionId === sessionId) {
+        currentSessionId = null;
+      }
+
+      await sendMessage(`Session ended: ${projectName}`);
     },
 
     onSessionUpdate: async (sessionId, name) => {
@@ -146,9 +178,12 @@ export function createTelegramApp(config: TelegramConfig) {
           telegramSentMessages.delete(contentKey);
           return;
         }
-        await sendChunkedMessage(content, `_User (terminal):_`, { disable_notification: true });
+        const userPrefix = activeSessions.size > 1
+          ? `_User (${tracking.projectName}):_`
+          : `_User (terminal):_`;
+        await sendChunkedMessage(content, userPrefix, { disable_notification: true });
       } else {
-        await sendChunkedMessage(content, `_Claude Code:_`);
+        await sendChunkedMessage(content, getSessionPrefix(sessionId));
 
         // Extract and upload any images mentioned in the response
         const session = sessionManager.getSession(sessionId);
@@ -181,7 +216,7 @@ export function createTelegramApp(config: TelegramConfig) {
       if (!tracking || todos.length === 0) return;
 
       const todosText = formatTodos(todos);
-      await sendMessage(`_Claude Code:_ *Tasks:*\n${todosText}`);
+      await sendMessage(`${getSessionPrefix(sessionId)} *Tasks:*\n${todosText}`);
     },
 
     onToolCall: async (_sessionId, _tool) => {
@@ -200,9 +235,62 @@ export function createTelegramApp(config: TelegramConfig) {
         ? 'Planning mode - Claude is designing a solution'
         : 'Execution mode - Claude is implementing';
 
-      await sendMessage(`_Claude Code:_ ${status}`);
+      await sendMessage(`${getSessionPrefix(sessionId)} ${status}`);
     },
   });
+
+  // Load registered projects from ~/.afk-code/projects.yaml
+  async function loadProjects(): Promise<Map<string, string>> {
+    const projects = new Map<string, string>();
+    try {
+      const content = await readFile(`${AFK_CODE_DIR}/projects.yaml`, 'utf-8');
+      const parsed = parseYaml(content);
+      if (parsed?.projects) {
+        for (const [name, path] of Object.entries(parsed.projects)) {
+          const expanded = (path as string).replace(/^~/, homedir());
+          projects.set(name, expanded);
+        }
+      }
+    } catch {
+      // File not found or parse error
+    }
+    return projects;
+  }
+
+  // Ensure tmux 'afk' session exists
+  async function ensureTmuxSession(): Promise<void> {
+    try {
+      await execAsync('tmux has-session -t afk');
+    } catch {
+      await execAsync('tmux new-session -d -s afk -n main');
+    }
+  }
+
+  // Start a Claude Code session in a tmux window
+  async function createSessionInTmux(
+    name: string,
+    dir: string,
+    continueFlag: boolean
+  ): Promise<{ ok: boolean; error?: string }> {
+    try {
+      const continueArg = continueFlag ? ' --continue' : '';
+      const escapedDir = dir.replace(/'/g, "'\\''");
+      const cmd = `cd '${escapedDir}' && source ~/.nvm/nvm.sh && afk-code run -- claude --dangerously-skip-permissions${continueArg}`;
+      const escapedCmd = cmd.replace(/'/g, "'\\''");
+      await execAsync(`tmux new-window -t afk -n '${name}' '${escapedCmd}'`);
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: err.message || String(err) };
+    }
+  }
+
+  // Get session prefix for messages (project name based)
+  function getSessionPrefix(sessionId: string): string {
+    if (activeSessions.size <= 1) return '_Claude Code:_';
+    const tracking = activeSessions.get(sessionId);
+    const name = tracking?.projectName || 'unknown';
+    return `_Claude Code (${name}):_`;
+  }
 
   function getCurrentSession(): SessionTracking | null {
     // If explicit session selected, use it
@@ -218,27 +306,40 @@ export function createTelegramApp(config: TelegramConfig) {
       return activeSessions.values().next().value;
     }
 
+    // Fallback to most recent session
+    if (activeSessions.size > 1) {
+      return getMostRecentSession();
+    }
+
     return null;
   }
 
-  function getSessionByName(name: string): SessionTracking | null {
-    const sessions = Array.from(activeSessions.values());
-
-    // Support numeric index (1-based)
-    const num = parseInt(name, 10);
-    if (!isNaN(num) && num >= 1 && num <= sessions.length) {
-      return sessions[num - 1];
-    }
-
+  // Find session by project name or by matching CWD against projects.yaml path
+  async function getSessionByProjectName(name: string): Promise<SessionTracking | null> {
     const nameLower = name.toLowerCase();
-    for (const tracking of sessions) {
-      const displayName = `${tracking.projectName}/${tracking.sessionName}`.toLowerCase();
-      if (
-        tracking.sessionName.toLowerCase().startsWith(nameLower) ||
-        tracking.projectName.toLowerCase().startsWith(nameLower) ||
-        displayName.startsWith(nameLower)
-      ) {
+    // Exact project name match
+    for (const tracking of activeSessions.values()) {
+      if (tracking.projectName.toLowerCase() === nameLower) {
         return tracking;
+      }
+    }
+    // Partial project name match
+    for (const tracking of activeSessions.values()) {
+      if (tracking.projectName.toLowerCase().startsWith(nameLower)) {
+        return tracking;
+      }
+    }
+    // CWD-based match: check if any active session's cwd matches the project path
+    const projects = await loadProjects();
+    const projectDir = projects.get(name);
+    if (projectDir) {
+      for (const tracking of activeSessions.values()) {
+        const session = sessionManager.getSession(tracking.sessionId);
+        if (session && (session.cwd === projectDir || session.cwd.startsWith(projectDir + '/'))) {
+          // Fix the projectName for future lookups
+          tracking.projectName = name;
+          return tracking;
+        }
       }
     }
     return null;
@@ -258,10 +359,11 @@ export function createTelegramApp(config: TelegramConfig) {
   const scheduler = new Scheduler({
     sessionManager,
     getActiveSessionId: () => {
-      const current = getCurrentSession();
-      if (current) return current.sessionId;
-      const recent = getMostRecentSession();
-      return recent?.sessionId || null;
+      // Heartbeat/Cron always targets the primary session
+      if (primarySessionId && activeSessions.has(primarySessionId)) {
+        return primarySessionId;
+      }
+      return null;
     },
     isSessionBusy: (sessionId: string) => sessionManager.isSessionBusy(sessionId),
     notify: (message: string) => {
@@ -286,18 +388,7 @@ export function createTelegramApp(config: TelegramConfig) {
     const current = getCurrentSession();
 
     if (!current) {
-      if (activeSessions.size === 0) {
-        await ctx.reply('No active sessions. Start one with:\n`afk-code run -- claude`', { parse_mode: 'Markdown' });
-      } else {
-        // Multiple sessions, need to select one
-        const list = Array.from(activeSessions.values())
-          .map((s, i) => `${i + 1}: \`${s.projectName}/${s.sessionName}\``)
-          .join('\n');
-        await ctx.reply(
-          `Multiple sessions active. Select one first:\n\n${list}\n\nUse: \`/switch <number or name>\``,
-          { parse_mode: 'Markdown' }
-        );
-      }
+      await ctx.reply('No active sessions. Use `/switch <project>` to start one.', { parse_mode: 'Markdown' });
       return;
     }
 
@@ -307,6 +398,8 @@ export function createTelegramApp(config: TelegramConfig) {
     if (!sent) {
       telegramSentMessages.delete(text.trim());
       await ctx.reply('Failed to send input - session not connected.');
+    } else if (activeSessions.size > 1) {
+      await ctx.reply(`→ ${current.projectName}`, { parse_mode: 'Markdown', disable_notification: true } as any);
     }
   });
 
@@ -314,18 +407,8 @@ export function createTelegramApp(config: TelegramConfig) {
     const [command, ...args] = text.split(' ');
     const sessionArg = args[0];
 
-    let targetSession: SessionTracking | null = null;
-    if (sessionArg && !sessionArg.startsWith('/')) {
-      for (const tracking of activeSessions.values()) {
-        if (tracking.sessionName.toLowerCase().startsWith(sessionArg.toLowerCase())) {
-          targetSession = tracking;
-          break;
-        }
-      }
-    }
-    if (!targetSession) {
-      targetSession = getMostRecentSession();
-    }
+    // Resolve target session for control commands (interrupt, compact, etc.)
+    let targetSession = getCurrentSession();
 
     switch (command.toLowerCase()) {
       case '/start': {
@@ -333,58 +416,82 @@ export function createTelegramApp(config: TelegramConfig) {
           `*AFK Code Telegram Bot*\n\n` +
             `This bot lets you monitor and interact with Claude Code sessions.\n` +
             `Heartbeat and Cron scheduler are active.\n\n` +
-            `Start a session with:\n` +
-            `\`afk-code run -- claude\`\n\n` +
+            `Use \`/switch <project>\` to start or switch sessions.\n\n` +
             `Type /help for available commands.`,
           { parse_mode: 'Markdown' }
         );
         break;
       }
 
-      case '/sessions': {
-        if (activeSessions.size === 0) {
-          await ctx.reply('No active sessions. Start one with `afk-code run -- claude`');
-          return;
-        }
-
-        const current = getCurrentSession();
-        const list = Array.from(activeSessions.values())
-          .map((s, i) => {
-            const isCurrent = current && s.sessionId === current.sessionId;
-            const displayName = `${s.projectName}/${s.sessionName}`;
-            return isCurrent ? `${i + 1}: *${displayName}* ← current` : `${i + 1}: ${displayName}`;
-          })
-          .join('\n');
-
-        await ctx.reply(`*Active Sessions:*\n${list}\n\nUse \`/switch <number or name>\` to change`, { parse_mode: 'Markdown' });
-        break;
-      }
-
       case '/switch':
       case '/select': {
         if (!sessionArg) {
-          if (activeSessions.size === 0) {
-            await ctx.reply('No active sessions.');
+          // Show projects list with status
+          const projects = await loadProjects();
+          if (projects.size === 0) {
+            await ctx.reply('No projects configured.\nEdit `~/.afk-code/projects.yaml`', { parse_mode: 'Markdown' });
             return;
           }
           const current = getCurrentSession();
-          const list = Array.from(activeSessions.values())
-            .map((s, i) => {
-              const isCurrent = current && s.sessionId === current.sessionId;
-              const displayName = `${s.projectName}/${s.sessionName}`;
-              return isCurrent ? `${i + 1}: *${displayName}* ← current` : `${i + 1}: ${displayName}`;
-            })
-            .join('\n');
-          await ctx.reply(`*Sessions:*\n${list}\n\nUse: \`/switch <number or name>\``, { parse_mode: 'Markdown' });
+          const lines: string[] = [];
+          for (const [name] of projects.entries()) {
+            const session = await getSessionByProjectName(name);
+            const isActive = !!session;
+            const isCurrent = current && session && session.sessionId === current.sessionId;
+            const isPrimary = session && session.sessionId === primarySessionId;
+            const status = isActive ? '🟢' : '⚪';
+            const markers = [
+              isCurrent ? '← current' : '',
+              isPrimary ? '⭐' : '',
+            ].filter(Boolean).join(' ');
+            lines.push(`${status} \`${name}\`${markers ? ` ${markers}` : ''}`);
+          }
+          const list = lines.join('\n');
+          await ctx.reply(`*Projects:*\n${list}\n\nUse: \`/switch <project>\`\n⭐ = heartbeat/cron target`, { parse_mode: 'Markdown' });
           return;
         }
-        const session = getSessionByName(sessionArg);
-        if (session) {
-          currentSessionId = session.sessionId;
-          await ctx.reply(`Switched to: *${session.projectName}/${session.sessionName}*`, { parse_mode: 'Markdown' });
-        } else {
-          await ctx.reply(`Session not found: ${sessionArg}`);
+
+        const continueFlag = args.includes('--continue') || args.includes('--resume');
+        const projectName = args.filter(a => !a.startsWith('--'))[0];
+
+        // Check if already running
+        const existing = await getSessionByProjectName(projectName);
+        if (existing) {
+          currentSessionId = existing.sessionId;
+          await ctx.reply(`Switched to: *${existing.projectName}*`, { parse_mode: 'Markdown' });
+          return;
         }
+
+        // Not running - try to start it
+        const projects = await loadProjects();
+        const projectDir = projects.get(projectName);
+        if (!projectDir) {
+          await ctx.reply(`Project not found: \`${projectName}\`\nUse \`/switch\` to see available projects.`, { parse_mode: 'Markdown' });
+          return;
+        }
+
+        // Verify directory exists
+        try {
+          const s = await stat(projectDir);
+          if (!s.isDirectory()) throw new Error('Not a directory');
+        } catch {
+          await ctx.reply(`Directory not found: \`${projectDir}\``, { parse_mode: 'Markdown' });
+          return;
+        }
+
+        await ensureTmuxSession();
+
+        await ctx.reply(`Starting \`${projectName}\`...${continueFlag ? ' (continue)' : ''}`, { parse_mode: 'Markdown' });
+        const result = await createSessionInTmux(projectName, projectDir, continueFlag);
+        if (!result.ok) {
+          await ctx.reply(`Failed: ${result.error}`);
+        }
+        break;
+      }
+
+      case '/projects': {
+        // Alias for /switch without args
+        await handleCommand(ctx, '/switch');
         break;
       }
 
@@ -435,7 +542,7 @@ export function createTelegramApp(config: TelegramConfig) {
           await ctx.reply('No active session.');
           return;
         }
-        const modelArg = args.slice(targetSession === getSessionByName(args[0] || '') ? 1 : 0).join(' ');
+        const modelArg = args.join(' ');
         if (!modelArg) {
           await ctx.reply('Usage: `/model <opus|sonnet|haiku>`', { parse_mode: 'Markdown' });
           return;
@@ -454,9 +561,13 @@ export function createTelegramApp(config: TelegramConfig) {
           return;
         }
 
+        const primaryTracking = primarySessionId ? activeSessions.get(primarySessionId) : null;
+        const targetName = primaryTracking ? primaryTracking.projectName : 'none';
+
         const statusLines = [
           `*Heartbeat Status*`,
           `Enabled: ${hb.enabled ? 'Yes' : 'No'}`,
+          `Target: ${targetName} ⭐`,
           `Interval: ${hb.intervalMinutes} min`,
           `Beat count: ${hb.beatCount}`,
           `Last beat: ${hb.lastBeatTime || 'Never'}`,
@@ -470,7 +581,7 @@ export function createTelegramApp(config: TelegramConfig) {
         await ctx.reply('Triggering Heartbeat...');
         const triggered = await scheduler.triggerHeartbeat();
         if (!triggered) {
-          await ctx.reply('Failed to trigger Heartbeat. No active session?');
+          await ctx.reply('Failed to trigger Heartbeat. No primary session?');
         }
         break;
       }
@@ -521,8 +632,8 @@ export function createTelegramApp(config: TelegramConfig) {
         await ctx.reply(
           `*AFK Code Commands:*\n\n` +
             `*Session:*\n` +
-            `/sessions - List active sessions\n` +
-            `/switch <name> - Switch to a session\n` +
+            `/switch <project> - Switch/start session\n` +
+            `/projects - List projects\n` +
             `/model <name> - Switch model\n` +
             `/compact - Compact conversation\n` +
             `/background - Send Ctrl+B\n` +
@@ -535,7 +646,8 @@ export function createTelegramApp(config: TelegramConfig) {
             `/memory - Show MEMORY.md\n` +
             `/soul - Show SOUL.md\n\n` +
             `/help - Show this message\n\n` +
-            `_Messages go to the current session (auto-selected if only one)._`,
+            `_Messages go to the current session._\n` +
+            `_⭐ = primary session (heartbeat/cron target)_`,
           { parse_mode: 'Markdown' }
         );
         break;
