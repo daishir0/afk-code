@@ -42,6 +42,7 @@ export function createTelegramApp(config: TelegramConfig) {
   let currentSessionId: string | null = null; // Explicitly selected session
   let primarySessionId: string | null = null; // First session started (Heartbeat/Cron target)
   let pendingSwitchProject: string | null = null; // Project name awaiting session start
+  let verboseMode = false; // Show tool calls/results in Telegram
 
   // Fork tracking
   interface ForkInfo {
@@ -309,12 +310,34 @@ export function createTelegramApp(config: TelegramConfig) {
       await sendMessage(`${getSessionPrefix(sessionId)} *Tasks:*\n${todosText}`);
     },
 
-    onToolCall: async (_sessionId, _tool) => {
-      // Disabled to reduce message volume
+    onToolCall: async (sessionId, tool) => {
+      if (!verboseMode) return;
+      const tracking = activeSessions.get(sessionId);
+      if (!tracking) return;
+      const input = typeof tool.input === 'string'
+        ? tool.input
+        : JSON.stringify(tool.input, null, 2);
+      const preview = input.length > 300 ? input.substring(0, 300) + '...' : input;
+      await sendMessage(
+        `${getSessionPrefix(sessionId)} 🔧 \`${tool.name}\`\n\`\`\`\n${preview}\n\`\`\``,
+        'Markdown',
+        { disable_notification: true }
+      );
     },
 
-    onToolResult: async (_sessionId, _result) => {
-      // Disabled to reduce message volume
+    onToolResult: async (sessionId, result) => {
+      if (!verboseMode) return;
+      const tracking = activeSessions.get(sessionId);
+      if (!tracking) return;
+      const preview = result.content.length > 500
+        ? result.content.substring(0, 500) + '...'
+        : result.content;
+      const icon = result.isError ? '❌' : '✅';
+      await sendMessage(
+        `${getSessionPrefix(sessionId)} ${icon} Result:\n\`\`\`\n${preview}\n\`\`\``,
+        'Markdown',
+        { disable_notification: true }
+      );
     },
 
     onPlanModeChange: async (sessionId, inPlanMode) => {
@@ -1023,6 +1046,13 @@ export function createTelegramApp(config: TelegramConfig) {
         break;
       }
 
+      case '/verbose':
+      case '/v': {
+        verboseMode = !verboseMode;
+        await ctx.reply(`Verbose mode: ${verboseMode ? 'ON 🔧' : 'OFF'}`);
+        break;
+      }
+
       case '/help': {
         await ctx.reply(
           `*AFK Code Commands:*\n\n` +
@@ -1035,7 +1065,8 @@ export function createTelegramApp(config: TelegramConfig) {
             `/background - Send Ctrl+B\n` +
             `/interrupt - Send Escape\n` +
             `/kill - Kill current session\n` +
-            `/mode - Toggle mode (Shift+Tab)\n\n` +
+            `/mode - Toggle mode (Shift+Tab)\n` +
+            `/verbose - Toggle tool call/result display\n\n` +
             `*Autonomous:*\n` +
             `/heartbeat - Heartbeat status\n` +
             `/wakeup - Trigger Heartbeat now\n` +
