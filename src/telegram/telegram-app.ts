@@ -886,6 +886,7 @@ export function createTelegramApp(config: TelegramConfig) {
         break;
       }
 
+      case '/':
       case '/interrupt':
       case '/stop': {
         if (!targetSession) {
