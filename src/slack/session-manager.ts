@@ -183,6 +183,10 @@ export class SessionManager {
     };
   }
 
+  getWatchedFile(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.watchedFile;
+  }
+
   getAllSessions(): SessionInfo[] {
     return Array.from(this.sessions.values()).map((s) => ({
       id: s.id,

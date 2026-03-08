@@ -1,14 +1,17 @@
-import { Bot, Context, InputFile } from 'grammy';
-import { readFile, stat } from 'fs/promises';
+import { Bot, Context, InputFile, InlineKeyboard } from 'grammy';
+import { readdir, readFile, stat } from 'fs/promises';
 import { homedir } from 'os';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { basename, dirname } from 'path';
+import { randomUUID } from 'crypto';
 import { parse as parseYaml } from 'yaml';
 import type { TelegramConfig } from './types.js';
 import { SessionManager, type SessionInfo } from '../slack/session-manager.js';
 import { chunkMessage, formatTodos } from '../slack/message-formatter.js';
 import { extractImagePaths } from '../utils/image-extractor.js';
 import { Scheduler } from '../scheduler/index.js';
+import { parseJsonlTurns, copyJsonlTruncated, type ParsedTurn } from './jsonl-parser.js';
 
 const execAsync = promisify(exec);
 
@@ -39,6 +42,28 @@ export function createTelegramApp(config: TelegramConfig) {
   let currentSessionId: string | null = null; // Explicitly selected session
   let primarySessionId: string | null = null; // First session started (Heartbeat/Cron target)
   let pendingSwitchProject: string | null = null; // Project name awaiting session start
+
+  // Fork tracking
+  interface ForkInfo {
+    forkSessionId: string;
+    parentSessionId: string;
+    parentProjectName: string;
+    baseProjectName: string;    // Root project name (even for fork-of-fork)
+    forkName: string;           // "R1", "R2", etc.
+    forkNumber: number;
+  }
+
+  const forkRegistry = new Map<string, ForkInfo>();   // forkSessionId -> ForkInfo
+  const forkCounters = new Map<string, number>();     // baseProjectName -> next number
+  let pendingForkInfo: Omit<ForkInfo, 'forkSessionId'> | null = null;
+  let pendingRewind: {
+    sessionId: string;
+    projectName: string;
+    jsonlPath: string;
+    cwd: string;
+    turnNumber: number;
+    endLineIndex: number;
+  } | null = null;
 
   // Message queue for rate limiting (Telegram allows ~30 msg/sec but be conservative)
   const messageQueue: Array<() => Promise<void>> = [];
@@ -132,6 +157,33 @@ export function createTelegramApp(config: TelegramConfig) {
         pendingSwitchProject = null;
       }
 
+      // Handle pending fork
+      if (pendingForkInfo) {
+        const forkInfo: ForkInfo = { ...pendingForkInfo, forkSessionId: session.id };
+        forkRegistry.set(session.id, forkInfo);
+        const tracking = activeSessions.get(session.id);
+        if (tracking) {
+          tracking.projectName = forkInfo.forkName;
+          projectName = forkInfo.forkName;
+        }
+        currentSessionId = session.id;
+        pendingForkInfo = null;
+      }
+
+      // Handle pending rewind (switch to new session, kill old tmux window)
+      if (pendingRewind) {
+        currentSessionId = session.id;
+        const oldTracking = activeSessions.get(pendingRewind.sessionId);
+        const oldProjectName = oldTracking?.projectName || 'unknown';
+        // Kill old tmux window
+        try {
+          await execAsync(`tmux kill-window -t afk:${oldProjectName}`);
+        } catch {
+          // Old window may already be gone
+        }
+        pendingRewind = null;
+      }
+
       // Format display: strip verbose flags for cleaner display
       const HIDDEN_FLAGS = ['--dangerously-skip-permissions'];
       const parts = session.name.split(' ');
@@ -142,14 +194,27 @@ export function createTelegramApp(config: TelegramConfig) {
         : cmd;
 
       const isPrimary = session.id === primarySessionId ? ' ⭐' : '';
+      const list = await buildProjectList();
       await sendMessage(
-        `Session started: ${projectName}/${sessionLabel}${isPrimary}\n` + `Directory: \`${session.cwd}\``
+        `Session started: ${projectName}/${sessionLabel}${isPrimary}\n` + `Directory: \`${session.cwd}\`\n\n${list}`
       );
     },
 
     onSessionEnd: async (sessionId) => {
       const tracking = activeSessions.get(sessionId);
       const projectName = tracking?.projectName || sessionId;
+
+      // Check if this was a fork session - auto-return to parent
+      const forkInfo = forkRegistry.get(sessionId);
+      let autoReturnMsg = '';
+      if (currentSessionId === sessionId && forkInfo) {
+        const parent = activeSessions.get(forkInfo.parentSessionId);
+        if (parent) {
+          currentSessionId = forkInfo.parentSessionId;
+          autoReturnMsg = ` → \`${forkInfo.parentProjectName}\``;
+        }
+      }
+      if (forkInfo) forkRegistry.delete(sessionId);
 
       activeSessions.delete(sessionId);
       sessionMessageBuffers.delete(sessionId);
@@ -159,12 +224,13 @@ export function createTelegramApp(config: TelegramConfig) {
         primarySessionId = null;
       }
 
-      // If current session ended, clear it
+      // If current session ended, clear it (and no auto-return happened)
       if (currentSessionId === sessionId) {
         currentSessionId = null;
       }
 
-      await sendMessage(`Session ended: ${projectName}`);
+      const list = await buildProjectList();
+      await sendMessage(`Session ended: ${projectName}${autoReturnMsg}\n\n${list}`);
     },
 
     onSessionUpdate: async (sessionId, name) => {
@@ -290,16 +356,40 @@ export function createTelegramApp(config: TelegramConfig) {
     }
   }
 
+  // Check if a project directory has any previous conversations
+  async function hasExistingConversation(dir: string): Promise<boolean> {
+    const encodedPath = dir.replace(/[/._]/g, '-');
+    const projectDir = `${homedir()}/.claude/projects/${encodedPath}`;
+    try {
+      const files = await readdir(projectDir);
+      return files.some(f => f.endsWith('.jsonl') && !f.startsWith('agent-'));
+    } catch {
+      return false;
+    }
+  }
+
   // Start a Claude Code session in a tmux window
   async function createSessionInTmux(
     name: string,
     dir: string,
-    continueFlag: boolean
+    options: {
+      continueFlag?: boolean;
+      resumeId?: string;      // --resume <uuid>
+      forkSession?: boolean;  // --fork-session
+    }
   ): Promise<{ ok: boolean; error?: string }> {
     try {
-      const continueArg = continueFlag ? ' --continue' : '';
+      let extraArgs = '';
+      if (options.resumeId) {
+        extraArgs += ` --resume ${options.resumeId}`;
+        if (options.forkSession) {
+          extraArgs += ' --fork-session';
+        }
+      } else if (options.continueFlag && await hasExistingConversation(dir)) {
+        extraArgs += ' --continue';
+      }
       const escapedDir = dir.replace(/'/g, "'\\''");
-      const cmd = `cd '${escapedDir}' && source ~/.nvm/nvm.sh && afk-code run -- claude --dangerously-skip-permissions${continueArg}`;
+      const cmd = `cd '${escapedDir}' && source ~/.nvm/nvm.sh && afk-code run -- claude --dangerously-skip-permissions${extraArgs}`;
       const escapedCmd = cmd.replace(/'/g, "'\\''");
       await execAsync(`tmux new-window -t afk -n '${name}' '${escapedCmd}'`);
       return { ok: true };
@@ -346,7 +436,7 @@ export function createTelegramApp(config: TelegramConfig) {
 
     // Auto-select if only one session
     if (activeSessions.size === 1) {
-      return activeSessions.values().next().value;
+      return activeSessions.values().next().value ?? null;
     }
 
     // Fallback to most recent session
@@ -388,6 +478,33 @@ export function createTelegramApp(config: TelegramConfig) {
     return null;
   }
 
+  async function buildProjectList(): Promise<string> {
+    const projects = await loadProjects();
+    if (projects.size === 0) return 'No projects configured.';
+    const current = getCurrentSession();
+    const lines: string[] = [];
+    for (const [name] of projects.entries()) {
+      const session = await getSessionByProjectName(name);
+      const isActive = !!session;
+      const isCurrent = current && session && session.sessionId === current.sessionId;
+      const isPrimary = session && session.sessionId === primarySessionId;
+      const status = isActive ? '🟢' : '⚪';
+      const markers = [
+        isCurrent ? '← current' : '',
+        isPrimary ? '⭐' : '',
+      ].filter(Boolean).join(' ');
+      lines.push(`${status} \`${name}\`${markers ? ` ${markers}` : ''}`);
+      for (const [, fi] of forkRegistry) {
+        if (fi.baseProjectName !== name) continue;
+        const forkTracking = activeSessions.get(fi.forkSessionId);
+        if (!forkTracking) continue;
+        const isForkCurrent = currentSessionId === fi.forkSessionId;
+        lines.push(`   └ 🟢 \`${fi.forkName}\`${isForkCurrent ? ' ← current' : ''}`);
+      }
+    }
+    return `*Projects:*\n${lines.join('\n')}\n⭐ = heartbeat/cron target`;
+  }
+
   function getMostRecentSession(): SessionTracking | null {
     let mostRecent: SessionTracking | null = null;
     for (const tracking of activeSessions.values()) {
@@ -414,6 +531,152 @@ export function createTelegramApp(config: TelegramConfig) {
     },
     getOtherSessionsSummary: (excludeSessionId: string) =>
       getOtherSessionsSummary(excludeSessionId),
+  });
+
+  // Handle InlineKeyboard callback queries (rewind/fork buttons)
+  bot.on('callback_query:data', async (ctx) => {
+    if (ctx.chat?.id.toString() !== config.chatId) return;
+
+    const data = ctx.callbackQuery.data;
+    await ctx.answerCallbackQuery();
+
+    // rewind_select_N → show confirmation
+    if (data.startsWith('rewind_select_')) {
+      const turnNumber = parseInt(data.replace('rewind_select_', ''), 10);
+      const current = getCurrentSession();
+      if (!current) {
+        await ctx.reply('No active session.');
+        return;
+      }
+      const jsonlPath = sessionManager.getWatchedFile(current.sessionId);
+      if (!jsonlPath) {
+        await ctx.reply('JSONL file not found.');
+        return;
+      }
+      try {
+        const turns = await parseJsonlTurns(jsonlPath);
+        const turn = turns.find((t) => t.turnNumber === turnNumber);
+        if (!turn) {
+          await ctx.reply(`Turn ${turnNumber} not found. Max: ${turns.length}`);
+          return;
+        }
+        const session = sessionManager.getSession(current.sessionId);
+
+        // Store pending rewind info
+        pendingRewind = {
+          sessionId: current.sessionId,
+          projectName: current.projectName,
+          jsonlPath,
+          cwd: session?.cwd || '',
+          turnNumber,
+          endLineIndex: turn.endLineIndex,
+        };
+
+        const keyboard = new InlineKeyboard()
+          .text('Rewind', 'rewind_confirm')
+          .text('Fork from here', 'rewind_fork')
+          .text('Cancel', 'rewind_cancel');
+
+        await ctx.reply(
+          `Rewind to turn ${turnNumber}?\n> ${turn.userMessage}`,
+          { reply_markup: keyboard }
+        );
+      } catch (err: any) {
+        await ctx.reply(`Error: ${err.message}`);
+      }
+      return;
+    }
+
+    // rewind_confirm → execute rewind (fork-based, near-zero downtime)
+    if (data === 'rewind_confirm') {
+      if (!pendingRewind) {
+        await ctx.reply('No pending rewind.');
+        return;
+      }
+      const { sessionId, projectName, jsonlPath, cwd, endLineIndex } = pendingRewind;
+
+      try {
+        // Create truncated copy with new UUID
+        const newUuid = randomUUID();
+        const projectDir = dirname(jsonlPath);
+        const newJsonlPath = `${projectDir}/${newUuid}.jsonl`;
+        await copyJsonlTruncated(jsonlPath, newJsonlPath, endLineIndex);
+
+        // Set up as pending rewind (onSessionStart will handle cleanup)
+        pendingSwitchProject = projectName;
+
+        await ctx.reply(`Rewinding \`${projectName}\` to turn ${pendingRewind.turnNumber}...`, { parse_mode: 'Markdown' });
+        await ensureTmuxSession();
+        const result = await createSessionInTmux(projectName, cwd, {
+          resumeId: newUuid,
+          forkSession: true,
+        });
+        if (!result.ok) {
+          pendingRewind = null;
+          pendingSwitchProject = null;
+          await ctx.reply(`Rewind failed: ${result.error}`);
+        }
+      } catch (err: any) {
+        pendingRewind = null;
+        await ctx.reply(`Rewind error: ${err.message}`);
+      }
+      return;
+    }
+
+    // rewind_fork → fork from selected turn point
+    if (data === 'rewind_fork') {
+      if (!pendingRewind) {
+        await ctx.reply('No pending rewind.');
+        return;
+      }
+      const { sessionId, projectName, jsonlPath, cwd, endLineIndex } = pendingRewind;
+      pendingRewind = null;
+
+      try {
+        // Determine fork name
+        const currentTracking = activeSessions.get(sessionId);
+        const existingFork = forkRegistry.get(sessionId);
+        const baseProject = existingFork?.baseProjectName || projectName;
+        const nextNum = (forkCounters.get(baseProject) || 0) + 1;
+        forkCounters.set(baseProject, nextNum);
+        const forkName = `${baseProject}${nextNum}`;
+
+        // Create truncated copy with new UUID
+        const newUuid = randomUUID();
+        const projectDir = dirname(jsonlPath);
+        const newJsonlPath = `${projectDir}/${newUuid}.jsonl`;
+        await copyJsonlTruncated(jsonlPath, newJsonlPath, endLineIndex);
+
+        pendingForkInfo = {
+          parentSessionId: sessionId,
+          parentProjectName: projectName,
+          baseProjectName: baseProject,
+          forkName,
+          forkNumber: nextNum,
+        };
+
+        await ctx.reply(`Forking \`${projectName}\` → \`${forkName}\` from turn...`, { parse_mode: 'Markdown' });
+        await ensureTmuxSession();
+        const result = await createSessionInTmux(forkName, cwd, {
+          resumeId: newUuid,
+          forkSession: true,
+        });
+        if (!result.ok) {
+          pendingForkInfo = null;
+          await ctx.reply(`Fork failed: ${result.error}`);
+        }
+      } catch (err: any) {
+        await ctx.reply(`Fork error: ${err.message}`);
+      }
+      return;
+    }
+
+    // rewind_cancel
+    if (data === 'rewind_cancel') {
+      pendingRewind = null;
+      await ctx.reply('Rewind cancelled.');
+      return;
+    }
   });
 
   // Handle incoming messages
@@ -447,13 +710,15 @@ export function createTelegramApp(config: TelegramConfig) {
   });
 
   async function handleCommand(ctx: Context, text: string) {
-    const [command, ...args] = text.split(' ');
+    const [rawCommand, ...args] = text.split(' ');
+    // Strip @botname suffix (Telegram appends it in groups/sometimes in DMs)
+    const command = rawCommand.toLowerCase().replace(/@\S+$/, '');
     const sessionArg = args[0];
 
     // Resolve target session for control commands (interrupt, compact, etc.)
     let targetSession = getCurrentSession();
 
-    switch (command.toLowerCase()) {
+    switch (command) {
       case '/start': {
         await ctx.reply(
           `*AFK Code Telegram Bot*\n\n` +
@@ -469,28 +734,8 @@ export function createTelegramApp(config: TelegramConfig) {
       case '/switch':
       case '/select': {
         if (!sessionArg) {
-          // Show projects list with status
-          const projects = await loadProjects();
-          if (projects.size === 0) {
-            await ctx.reply('No projects configured.\nEdit `~/.afk-code/projects.yaml`', { parse_mode: 'Markdown' });
-            return;
-          }
-          const current = getCurrentSession();
-          const lines: string[] = [];
-          for (const [name] of projects.entries()) {
-            const session = await getSessionByProjectName(name);
-            const isActive = !!session;
-            const isCurrent = current && session && session.sessionId === current.sessionId;
-            const isPrimary = session && session.sessionId === primarySessionId;
-            const status = isActive ? '🟢' : '⚪';
-            const markers = [
-              isCurrent ? '← current' : '',
-              isPrimary ? '⭐' : '',
-            ].filter(Boolean).join(' ');
-            lines.push(`${status} \`${name}\`${markers ? ` ${markers}` : ''}`);
-          }
-          const list = lines.join('\n');
-          await ctx.reply(`*Projects:*\n${list}\n\nUse: \`/switch <project>\`\n⭐ = heartbeat/cron target`, { parse_mode: 'Markdown' });
+          const list = await buildProjectList();
+          await ctx.reply(`${list}\n\nUse: \`/switch <project>\``, { parse_mode: 'Markdown' });
           return;
         }
 
@@ -502,7 +747,8 @@ export function createTelegramApp(config: TelegramConfig) {
         const existing = await getSessionByProjectName(projectName);
         if (existing) {
           currentSessionId = existing.sessionId;
-          await ctx.reply(`Switched to: *${existing.projectName}*`, { parse_mode: 'Markdown' });
+          const list = await buildProjectList();
+          await ctx.reply(`Switched to: *${existing.projectName}*\n\n${list}`, { parse_mode: 'Markdown' });
           return;
         }
 
@@ -527,7 +773,7 @@ export function createTelegramApp(config: TelegramConfig) {
 
         pendingSwitchProject = projectName;
         await ctx.reply(`Starting \`${projectName}\`...${newFlag ? ' (new)' : ' (continue)'}`, { parse_mode: 'Markdown' });
-        const result = await createSessionInTmux(projectName, projectDir, continueFlag);
+        const result = await createSessionInTmux(projectName, projectDir, { continueFlag });
         if (!result.ok) {
           pendingSwitchProject = null;
           await ctx.reply(`Failed: ${result.error}`);
@@ -535,9 +781,97 @@ export function createTelegramApp(config: TelegramConfig) {
         break;
       }
 
-      case '/projects': {
-        // Alias for /switch without args
-        await handleCommand(ctx, '/switch');
+      case '/rewind': {
+        if (sessionArg) {
+          const found = await getSessionByProjectName(sessionArg);
+          if (found) targetSession = found;
+        }
+        if (!targetSession) {
+          await ctx.reply('No active session.');
+          return;
+        }
+        const jsonlPath = sessionManager.getWatchedFile(targetSession.sessionId);
+        if (!jsonlPath) {
+          await ctx.reply(`\`${targetSession.projectName}\` has no conversation yet. Send a message first.`, { parse_mode: 'Markdown' });
+          return;
+        }
+        try {
+          const turns = await parseJsonlTurns(jsonlPath);
+          if (turns.length === 0) {
+            await ctx.reply('No turns found in conversation.');
+            return;
+          }
+          const recentTurns = turns.slice(-10);
+          const lines = recentTurns.map((t) => {
+            const time = new Date(t.timestamp).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+            const tools = t.toolCalls.length > 0 ? ` [${t.toolCalls.join(', ')}]` : '';
+            return `${t.turnNumber}. ${time} ${t.userMessage}${tools}`;
+          });
+
+          const keyboard = new InlineKeyboard();
+          for (const t of recentTurns) {
+            keyboard.text(`${t.turnNumber}`, `rewind_select_${t.turnNumber}`);
+          }
+
+          await ctx.reply(
+            `*Recent turns (${targetSession.projectName}):*\n${lines.join('\n')}`,
+            { parse_mode: 'Markdown', reply_markup: keyboard }
+          );
+        } catch (err: any) {
+          await ctx.reply(`Error parsing JSONL: ${err.message}`);
+        }
+        break;
+      }
+
+      case '/fork': {
+        if (sessionArg) {
+          const found = await getSessionByProjectName(sessionArg);
+          if (found) targetSession = found;
+        }
+        if (!targetSession) {
+          await ctx.reply('No active session.');
+          return;
+        }
+        const jsonlPath = sessionManager.getWatchedFile(targetSession.sessionId);
+        if (!jsonlPath) {
+          await ctx.reply(`\`${targetSession.projectName}\` has no conversation yet. Send a message first.`, { parse_mode: 'Markdown' });
+          return;
+        }
+        const session = sessionManager.getSession(targetSession.sessionId);
+        if (!session) {
+          await ctx.reply('Session not found.');
+          return;
+        }
+
+        // Determine base project name and fork name
+        const existingFork = forkRegistry.get(targetSession.sessionId);
+        const baseProject = existingFork?.baseProjectName || targetSession.projectName;
+        const nextNum = (forkCounters.get(baseProject) || 0) + 1;
+        forkCounters.set(baseProject, nextNum);
+        const forkName = `${baseProject}${nextNum}`;
+
+        // Extract UUID from JSONL filename
+        const jsonlFilename = basename(jsonlPath);
+        const resumeId = jsonlFilename.replace('.jsonl', '');
+
+        pendingForkInfo = {
+          parentSessionId: targetSession.sessionId,
+          parentProjectName: targetSession.projectName,
+          baseProjectName: baseProject,
+          forkName,
+          forkNumber: nextNum,
+        };
+
+        await ensureTmuxSession();
+        await ctx.reply(`Forking \`${targetSession.projectName}\` → \`${forkName}\`...`, { parse_mode: 'Markdown' });
+        const result = await createSessionInTmux(forkName, session.cwd, {
+          resumeId,
+          forkSession: true,
+        });
+        if (!result.ok) {
+          pendingForkInfo = null;
+          await ctx.reply(`Fork failed: ${result.error}`);
+        }
         break;
       }
 
@@ -560,6 +894,20 @@ export function createTelegramApp(config: TelegramConfig) {
         }
         const sent = sessionManager.sendInput(targetSession.sessionId, '\x1b');
         await ctx.reply(sent ? 'Sent interrupt (Escape)' : 'Failed - session not connected.');
+        break;
+      }
+
+      case '/kill': {
+        if (!targetSession) {
+          await ctx.reply('No active session.');
+          return;
+        }
+        const name = targetSession.projectName;
+        await ctx.reply(`Killing session \`${name}\`...`, { parse_mode: 'Markdown' });
+        try {
+          await execAsync(`tmux kill-window -t afk:${name}`);
+        } catch { /* window may already be gone */ }
+        // onSessionEnd handles cleanup (auto-return to parent, forkRegistry, project list display)
         break;
       }
 
@@ -679,11 +1027,13 @@ export function createTelegramApp(config: TelegramConfig) {
           `*AFK Code Commands:*\n\n` +
             `*Session:*\n` +
             `/switch <project> - Switch/start session\n` +
-            `/projects - List projects\n` +
+            `/rewind [project] - Rewind conversation\n` +
+            `/fork [project] - Fork conversation\n` +
             `/model <name> - Switch model\n` +
             `/compact - Compact conversation\n` +
             `/background - Send Ctrl+B\n` +
             `/interrupt - Send Escape\n` +
+            `/kill - Kill current session\n` +
             `/mode - Toggle mode (Shift+Tab)\n\n` +
             `*Autonomous:*\n` +
             `/heartbeat - Heartbeat status\n` +
@@ -700,7 +1050,7 @@ export function createTelegramApp(config: TelegramConfig) {
       }
 
       default:
-        // Ignore unknown commands
+        await ctx.reply(`Unknown command: \`${command}\`\nType /help for available commands.`, { parse_mode: 'Markdown' });
         break;
     }
   }
