@@ -491,7 +491,7 @@ export function createTelegramApp(config: TelegramConfig) {
         extraArgs += ' --continue';
       }
       const escapedDir = dir.replace(/'/g, "'\\''");
-      const cmd = `cd '${escapedDir}' && source ~/.nvm/nvm.sh && afk-code run -- claude --dangerously-skip-permissions${extraArgs}`;
+      const cmd = `cd '${escapedDir}' && (source ~/.nvm/nvm.sh 2>/dev/null || true) && afk-code run -- claude --dangerously-skip-permissions${extraArgs}`;
       const escapedCmd = cmd.replace(/'/g, "'\\''");
       await execAsync(`tmux new-window -t afk -n '${name}' '${escapedCmd}'`);
       return { ok: true };
