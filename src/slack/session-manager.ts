@@ -199,6 +199,25 @@ export class SessionManager {
   }
 
   /**
+   * Pre-claim a JSONL file so other sessions' watchers won't steal it.
+   * Call this before creating a fork session to prevent race conditions.
+   */
+  claimFile(filePath: string): void {
+    this.claimedFiles.add(filePath);
+  }
+
+  /**
+   * Check if another session shares the same projectDir.
+   * When true, file-switching should be disabled to prevent cross-session interference.
+   */
+  private hasSharedProjectDir(session: InternalSession): boolean {
+    for (const [id, s] of this.sessions) {
+      if (id !== session.id && s.projectDir === session.projectDir) return true;
+    }
+    return false;
+  }
+
+  /**
    * Check if a session is busy (has had JSONL output within the last 30 seconds).
    * This prevents Heartbeat/Cron from interrupting Claude Code mid-operation.
    */
@@ -489,15 +508,19 @@ export class SessionManager {
         if (session.watchedFile && filePath === session.watchedFile) {
           await this.processJsonlUpdates(session);
         } else if (session.watchedFile && filePath !== session.watchedFile) {
-          // A different JSONL file changed - check if the session switched files
+          // A different JSONL file changed - only switch if it's a truly new file
           // (happens on "clear context" which creates a new JSONL)
-          const newFile = await this.findActiveJsonlFile(session);
-          if (newFile && newFile !== session.watchedFile) {
-            console.log(`[SessionManager] JSONL file switched: ${session.watchedFile} -> ${newFile}`);
-            this.claimedFiles.delete(session.watchedFile);
-            session.watchedFile = newFile;
-            this.claimedFiles.add(newFile);
-            await this.seedSeenMessages(session);
+          // NEVER switch when sharing projectDir with another session (fork scenario)
+          if (!this.hasSharedProjectDir(session) && !session.initialFileStats.has(filePath) && !this.claimedFiles.has(filePath)) {
+            if (filePath.endsWith('.jsonl') && !filename.startsWith('agent-')) {
+              if (await this.hasConversationMessages(filePath)) {
+                console.log(`[SessionManager] JSONL file switched: ${session.watchedFile} -> ${filePath}`);
+                this.claimedFiles.delete(session.watchedFile);
+                session.watchedFile = filePath;
+                this.claimedFiles.add(filePath);
+                await this.seedSeenMessages(session);
+              }
+            }
           }
         }
       });
@@ -518,15 +541,30 @@ export class SessionManager {
           session.watchedFile = newFile;
           this.claimedFiles.add(newFile);
         }
-      } else {
-        // Check if session switched to a new JSONL file (e.g. after "clear context")
-        const newFile = await this.findActiveJsonlFile(session);
-        if (newFile && newFile !== session.watchedFile) {
-          console.log(`[SessionManager] JSONL file switched (poll): ${session.watchedFile} -> ${newFile}`);
-          this.claimedFiles.delete(session.watchedFile);
-          session.watchedFile = newFile;
-          this.claimedFiles.add(newFile);
-          await this.seedSeenMessages(session);
+      } else if (!this.hasSharedProjectDir(session)) {
+        // Check if session switched to a truly new JSONL file (e.g. after "clear context")
+        // Only switch to files that didn't exist at session start to prevent ping-pong
+        // NEVER switch when sharing projectDir with another session (fork scenario)
+        try {
+          const files = await readdir(session.projectDir);
+          const jsonlFiles = files.filter((f) => f.endsWith('.jsonl') && !f.startsWith('agent-'));
+          for (const f of jsonlFiles) {
+            const path = `${session.projectDir}/${f}`;
+            if (path === session.watchedFile) continue;
+            if (this.claimedFiles.has(path)) continue;
+            // Only consider files that are truly new (not in initial snapshot)
+            if (session.initialFileStats.has(path)) continue;
+            if (await this.hasConversationMessages(path)) {
+              console.log(`[SessionManager] JSONL file switched (poll): ${session.watchedFile} -> ${path}`);
+              this.claimedFiles.delete(session.watchedFile);
+              session.watchedFile = path;
+              this.claimedFiles.add(path);
+              await this.seedSeenMessages(session);
+              break;
+            }
+          }
+        } catch {
+          // Directory might not exist
         }
       }
 

@@ -608,14 +608,21 @@ export function createTelegramApp(config: TelegramConfig) {
       ].filter(Boolean).join(' ');
       lines.push(`${num}. ${status} \`${name}\`${markers ? ` ${markers}` : ''}`);
       num++;
-      for (const [, fi] of forkRegistry) {
-        if (fi.baseProjectName !== name) continue;
-        const forkTracking = activeSessions.get(fi.forkSessionId);
-        if (!forkTracking) continue;
-        const isForkCurrent = currentSessionId === fi.forkSessionId;
-        lines.push(`   ${num}. 🟢 \`${fi.forkName}\`${isForkCurrent ? ' ← current' : ''}`);
-        num++;
-      }
+      // Recursive tree display of forks
+      const renderForkTree = (parentSessionId: string, depth: number) => {
+        for (const [, fi] of forkRegistry) {
+          if (fi.parentSessionId !== parentSessionId) continue;
+          if (!activeSessions.get(fi.forkSessionId)) continue;
+          const isForkCurrent = currentSessionId === fi.forkSessionId;
+          const isForkBusy = sessionManager.isSessionBusy(fi.forkSessionId);
+          const forkStatus = isForkBusy ? '⏳' : '🟢';
+          const indent = '   '.repeat(depth);
+          lines.push(`${indent}${num}. ${forkStatus} \`${fi.forkName}\`${isForkCurrent ? ' ← current' : ''}`);
+          num++;
+          renderForkTree(fi.forkSessionId, depth + 1);
+        }
+      };
+      if (session) renderForkTree(session.sessionId, 1);
     }
     return `*Projects:*\n${lines.join('\n')}\n⭐ = heartbeat/cron target`;
   }
@@ -623,15 +630,23 @@ export function createTelegramApp(config: TelegramConfig) {
   async function resolveProjectByNumber(n: number): Promise<string | null> {
     const projects = await loadProjects();
     let num = 1;
+    let found: string | null = null;
+    const walkForkTree = (parentSessionId: string): boolean => {
+      for (const [, fi] of forkRegistry) {
+        if (fi.parentSessionId !== parentSessionId) continue;
+        if (!activeSessions.get(fi.forkSessionId)) continue;
+        if (num === n) { found = fi.forkName; return true; }
+        num++;
+        if (walkForkTree(fi.forkSessionId)) return true;
+      }
+      return false;
+    };
     for (const [name] of projects.entries()) {
       if (num === n) return name;
       num++;
-      for (const [, fi] of forkRegistry) {
-        if (fi.baseProjectName !== name) continue;
-        const forkTracking = activeSessions.get(fi.forkSessionId);
-        if (!forkTracking) continue;
-        if (num === n) return fi.forkName;
-        num++;
+      const session = await getSessionByProjectName(name);
+      if (session) {
+        if (walkForkTree(session.sessionId)) return found;
       }
     }
     return null;
@@ -779,6 +794,9 @@ export function createTelegramApp(config: TelegramConfig) {
         const newJsonlPath = `${projectDir}/${newUuid}.jsonl`;
         await copyJsonlTruncated(jsonlPath, newJsonlPath, endLineIndex);
 
+        // Pre-claim the new JSONL so parent session's watcher won't steal it
+        sessionManager.claimFile(newJsonlPath);
+
         pendingForkInfo = {
           parentSessionId: sessionId,
           parentProjectName: projectName,
@@ -795,6 +813,7 @@ export function createTelegramApp(config: TelegramConfig) {
         });
         if (!result.ok) {
           pendingForkInfo = null;
+          sessionManager.claimFile(newJsonlPath); // Already claimed, no-op but safe
           await ctx.reply(`Fork failed: ${result.error}`);
         }
       } catch (err: any) {
