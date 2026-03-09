@@ -15,6 +15,11 @@ import { parseJsonlTurns, copyJsonlTruncated, type ParsedTurn } from './jsonl-pa
 
 const execAsync = promisify(exec);
 
+/** Escape Telegram Markdown special characters in dynamic content */
+function escTg(text: string): string {
+  return text.replace(/([*_`\[\]~\\])/g, '\\$1');
+}
+
 // Telegram has a 4096 character limit per message
 const MAX_MESSAGE_LENGTH = 4000;
 const AFK_CODE_DIR = `${homedir()}/.afk-code`;
@@ -862,17 +867,24 @@ export function createTelegramApp(config: TelegramConfig) {
           await ctx.reply(`\`${targetSession.projectName}\` has no conversation yet. Send a message first.`, { parse_mode: 'Markdown' });
           return;
         }
+        let recentTurns: ParsedTurn[];
         try {
           const turns = await parseJsonlTurns(jsonlPath);
           if (turns.length === 0) {
             await ctx.reply('No turns found in conversation.');
             return;
           }
-          const recentTurns = turns.slice(-10);
+          recentTurns = turns.slice(-10);
+        } catch (err: any) {
+          await ctx.reply(`Error parsing JSONL: ${err.message}`);
+          break;
+        }
+
+        {
           const lines = recentTurns.map((t) => {
             const time = new Date(t.timestamp).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
-            const tools = t.toolCalls.length > 0 ? ` [${t.toolCalls.join(', ')}]` : '';
-            return `${t.turnNumber}. ${time} ${t.userMessage}${tools}`;
+            const tools = t.toolCalls.length > 0 ? ` [${escTg(t.toolCalls.join(', '))}]` : '';
+            return `${t.turnNumber}. ${time} ${escTg(t.userMessage)}${tools}`;
           });
 
           const keyboard = new InlineKeyboard();
@@ -880,12 +892,12 @@ export function createTelegramApp(config: TelegramConfig) {
             keyboard.text(`${t.turnNumber}`, `rewind_select_${t.turnNumber}`);
           }
 
-          await ctx.reply(
-            `*Recent turns (${targetSession.projectName}):*\n${lines.join('\n')}`,
-            { parse_mode: 'Markdown', reply_markup: keyboard }
-          );
-        } catch (err: any) {
-          await ctx.reply(`Error parsing JSONL: ${err.message}`);
+          const msg = `*Recent turns (${escTg(targetSession.projectName)}):*\n${lines.join('\n')}`;
+          try {
+            await ctx.reply(msg, { parse_mode: 'Markdown', reply_markup: keyboard });
+          } catch {
+            await ctx.reply(msg.replace(/([*_`\[\]~\\])/g, ''), { reply_markup: keyboard });
+          }
         }
         break;
       }
