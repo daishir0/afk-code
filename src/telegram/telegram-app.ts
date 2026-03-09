@@ -78,6 +78,11 @@ export function createTelegramApp(config: TelegramConfig) {
   const messageQueue: Array<() => Promise<void>> = [];
   let processingQueue = false;
 
+  function drainMessageQueue() {
+    messageQueue.length = 0;
+    console.log('[Telegram] Message queue drained');
+  }
+
   async function processQueue() {
     if (processingQueue) return;
     processingQueue = true;
@@ -443,8 +448,8 @@ export function createTelegramApp(config: TelegramConfig) {
           projects.set(name, expanded);
         }
       }
-    } catch {
-      // File not found or parse error
+    } catch (err) {
+      console.error('[Telegram] Failed to load projects.yaml:', err);
     }
     return projects;
   }
@@ -1146,6 +1151,10 @@ export function createTelegramApp(config: TelegramConfig) {
           await ctx.reply('No active session.');
           return;
         }
+        if (messageQueue.length > 50) {
+          drainMessageQueue();
+          await ctx.reply('Queue flooded — drained.');
+        }
         const sent = sessionManager.sendInput(targetSession.sessionId, '\x1b');
         await ctx.reply(sent ? 'Sent interrupt (Escape)' : 'Failed - session not connected.');
         break;
@@ -1162,6 +1171,9 @@ export function createTelegramApp(config: TelegramConfig) {
         try {
           await execAsync(`tmux kill-window -t afk:${killName}`);
         } catch { /* window may already be gone */ }
+
+        // Drain any pending messages immediately
+        drainMessageQueue();
 
         // Immediate cleanup (onSessionEnd may fire later but is idempotent)
         const killForkInfo = forkRegistry.get(killSessionId);

@@ -346,6 +346,26 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Seed seenMessages with all current lines in the new JSONL file
+   * without forwarding any messages. Used on file switch to prevent
+   * re-processing old content while still allowing new lines to flow.
+   */
+  private async seedSeenMessages(session: InternalSession): Promise<void> {
+    if (!session.watchedFile) return;
+    try {
+      const content = await readFile(session.watchedFile, 'utf-8');
+      const lines = content.split('\n').filter(Boolean);
+      session.seenMessages.clear();
+      for (const line of lines) {
+        session.seenMessages.add(hash(line));
+      }
+      console.log(`[SessionManager] Seeded seenMessages with ${lines.length} lines from ${session.watchedFile}`);
+    } catch (err) {
+      console.error('[SessionManager] Error seeding seenMessages:', err);
+    }
+  }
+
   private async processJsonlUpdates(session: InternalSession): Promise<void> {
     if (!session.watchedFile) return;
 
@@ -477,8 +497,7 @@ export class SessionManager {
             this.claimedFiles.delete(session.watchedFile);
             session.watchedFile = newFile;
             this.claimedFiles.add(newFile);
-            session.seenMessages.clear();
-            await this.processJsonlUpdates(session);
+            await this.seedSeenMessages(session);
           }
         }
       });
@@ -507,7 +526,7 @@ export class SessionManager {
           this.claimedFiles.delete(session.watchedFile);
           session.watchedFile = newFile;
           this.claimedFiles.add(newFile);
-          session.seenMessages.clear();
+          await this.seedSeenMessages(session);
         }
       }
 
