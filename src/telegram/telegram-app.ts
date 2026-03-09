@@ -79,6 +79,7 @@ export function createTelegramApp(config: TelegramConfig) {
       if (fn) {
         try {
           await fn();
+          console.log(`[Telegram] Message sent (queue remaining: ${messageQueue.length})`);
         } catch (err) {
           console.error('[Telegram] Error sending message:', err);
         }
@@ -251,7 +252,11 @@ export function createTelegramApp(config: TelegramConfig) {
 
     onMessage: async (sessionId, role, content) => {
       const tracking = activeSessions.get(sessionId);
-      if (!tracking) return;
+      if (!tracking) {
+        console.log(`[Telegram] onMessage: no tracking for session ${sessionId.slice(0, 8)}, dropping ${role} message`);
+        return;
+      }
+      console.log(`[Telegram] onMessage: session=${sessionId.slice(0, 8)} project=${tracking.projectName} role=${role} len=${content.length}`);
 
       tracking.lastActivity = new Date();
 
@@ -265,8 +270,17 @@ export function createTelegramApp(config: TelegramConfig) {
         buffer.splice(0, buffer.length - MESSAGE_BUFFER_SIZE);
       }
 
+      // Skip noise messages from Claude Code
+      const trimmed = content.trim();
+      if (role === 'assistant' && (
+        trimmed === 'No response requested.' ||
+        trimmed === 'No response requested'
+      )) {
+        return;
+      }
+
       if (role === 'user') {
-        const contentKey = content.trim();
+        const contentKey = trimmed;
         if (telegramSentMessages.has(contentKey)) {
           telegramSentMessages.delete(contentKey);
           return;
@@ -506,6 +520,7 @@ export function createTelegramApp(config: TelegramConfig) {
     if (projects.size === 0) return 'No projects configured.';
     const current = getCurrentSession();
     const lines: string[] = [];
+    let num = 1;
     for (const [name] of projects.entries()) {
       const session = await getSessionByProjectName(name);
       const isActive = !!session;
@@ -516,16 +531,35 @@ export function createTelegramApp(config: TelegramConfig) {
         isCurrent ? '← current' : '',
         isPrimary ? '⭐' : '',
       ].filter(Boolean).join(' ');
-      lines.push(`${status} \`${name}\`${markers ? ` ${markers}` : ''}`);
+      lines.push(`${num}. ${status} \`${name}\`${markers ? ` ${markers}` : ''}`);
+      num++;
       for (const [, fi] of forkRegistry) {
         if (fi.baseProjectName !== name) continue;
         const forkTracking = activeSessions.get(fi.forkSessionId);
         if (!forkTracking) continue;
         const isForkCurrent = currentSessionId === fi.forkSessionId;
-        lines.push(`   └ 🟢 \`${fi.forkName}\`${isForkCurrent ? ' ← current' : ''}`);
+        lines.push(`   ${num}. 🟢 \`${fi.forkName}\`${isForkCurrent ? ' ← current' : ''}`);
+        num++;
       }
     }
     return `*Projects:*\n${lines.join('\n')}\n⭐ = heartbeat/cron target`;
+  }
+
+  async function resolveProjectByNumber(n: number): Promise<string | null> {
+    const projects = await loadProjects();
+    let num = 1;
+    for (const [name] of projects.entries()) {
+      if (num === n) return name;
+      num++;
+      for (const [, fi] of forkRegistry) {
+        if (fi.baseProjectName !== name) continue;
+        const forkTracking = activeSessions.get(fi.forkSessionId);
+        if (!forkTracking) continue;
+        if (num === n) return fi.forkName;
+        num++;
+      }
+    }
+    return null;
   }
 
   function getMostRecentSession(): SessionTracking | null {
@@ -764,7 +798,17 @@ export function createTelegramApp(config: TelegramConfig) {
 
         const newFlag = args.includes('--new');
         const continueFlag = !newFlag; // Default: continue. --new for fresh session
-        const projectName = args.filter(a => !a.startsWith('--'))[0];
+        let projectName = args.filter(a => !a.startsWith('--'))[0];
+
+        // Support numeric argument: /switch 1, /switch 2, etc.
+        if (/^\d+$/.test(projectName)) {
+          const resolved = await resolveProjectByNumber(parseInt(projectName, 10));
+          if (!resolved) {
+            await ctx.reply(`Invalid number: \`${projectName}\`\nUse \`/switch\` to see available projects.`, { parse_mode: 'Markdown' });
+            return;
+          }
+          projectName = resolved;
+        }
 
         // Check if already running
         const existing = await getSessionByProjectName(projectName);

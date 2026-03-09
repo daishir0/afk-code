@@ -406,6 +406,7 @@ export class SessionManager {
           if (messageTime < session.startedAt) continue;
 
           session.lastOutputTime = Date.now();
+          console.log(`[SessionManager] New message: session=${session.id.slice(0, 8)} role=${parsed.role} ts=${parsed.timestamp} len=${parsed.content.length}`);
 
           // Skip silent messages (Heartbeat/Cron prompts marked as silent)
           // Use startsWith instead of exact match because Claude Code
@@ -422,11 +423,13 @@ export class SessionManager {
               }
             }
             if (matchedSilent) {
+              console.log(`[SessionManager] Silent match: skipping user message (silent set size: ${this.silentMessages.size})`);
               this.silentMessages.delete(matchedSilent);
               continue;
             }
           }
 
+          console.log(`[SessionManager] Forwarding: session=${session.id.slice(0, 8)} role=${parsed.role}`);
           this.events.onMessage(session.id, parsed.role, parsed.content);
         }
       }
