@@ -793,6 +793,7 @@ export function createTelegramApp(config: TelegramConfig) {
         break;
       }
 
+      case '/s':
       case '/switch':
       case '/select': {
         if (!sessionArg) {
@@ -902,6 +903,7 @@ export function createTelegramApp(config: TelegramConfig) {
         break;
       }
 
+      case '/f':
       case '/fork': {
         if (sessionArg) {
           const found = await getSessionByProjectName(sessionArg);
@@ -1113,16 +1115,16 @@ export function createTelegramApp(config: TelegramConfig) {
         await ctx.reply(
           `*AFK Code Commands:*\n\n` +
             `*Session:*\n` +
-            `/switch <project> - Switch/start session\n` +
+            `/switch (/s) <project> - Switch/start session\n` +
             `/rewind [project] - Rewind conversation\n` +
-            `/fork [project] - Fork conversation\n` +
+            `/fork (/f) [project] - Fork conversation\n` +
             `/model <name> - Switch model\n` +
             `/compact - Compact conversation\n` +
-            `/background - Send Ctrl+B\n` +
-            `/interrupt - Send Escape\n` +
+            `/background (/bg) - Send Ctrl+B\n` +
+            `/interrupt (/) - Send Escape\n` +
             `/kill - Kill current session\n` +
             `/mode - Toggle mode (Shift+Tab)\n` +
-            `/verbose - Toggle tool call/result display\n\n` +
+            `/verbose (/v) - Toggle tool call/result display\n\n` +
             `*Autonomous:*\n` +
             `/heartbeat - Heartbeat status\n` +
             `/wakeup - Trigger Heartbeat now\n` +
