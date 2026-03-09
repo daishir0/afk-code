@@ -29,6 +29,7 @@ interface SessionTracking {
   sessionName: string;
   projectName: string;
   lastActivity: Date;
+  inPlanMode: boolean;
 }
 
 export function createTelegramApp(config: TelegramConfig) {
@@ -48,6 +49,8 @@ export function createTelegramApp(config: TelegramConfig) {
   let primarySessionId: string | null = null; // First session started (Heartbeat/Cron target)
   let pendingSwitchProject: string | null = null; // Project name awaiting session start
   let verboseMode = false; // Show tool calls/results in Telegram
+  const planFilePaths = new Map<string, string>(); // sessionId -> last written file path during plan mode
+  const waitingForPlanAction = new Set<string>(); // sessionIds waiting for ExitPlanMode user choice
 
   // Fork tracking
   interface ForkInfo {
@@ -100,19 +103,21 @@ export function createTelegramApp(config: TelegramConfig) {
   async function sendMessage(
     text: string,
     parseMode: 'Markdown' | 'HTML' | undefined = 'Markdown',
-    options?: { disable_notification?: boolean }
+    options?: { disable_notification?: boolean; reply_markup?: any }
   ) {
     messageQueue.push(async () => {
       try {
         await bot.api.sendMessage(config.chatId, text, {
           parse_mode: parseMode,
           disable_notification: options?.disable_notification,
+          reply_markup: options?.reply_markup,
         });
       } catch (err: any) {
         // If markdown fails, try without formatting
         if (parseMode && err.message?.includes('parse')) {
           await bot.api.sendMessage(config.chatId, text, {
             disable_notification: options?.disable_notification,
+            reply_markup: options?.reply_markup,
           });
         } else {
           throw err;
@@ -151,6 +156,7 @@ export function createTelegramApp(config: TelegramConfig) {
         sessionName: session.name,
         projectName: projectName,
         lastActivity: new Date(),
+        inPlanMode: false,
       });
 
       // First session becomes primary (Heartbeat/Cron target)
@@ -330,9 +336,51 @@ export function createTelegramApp(config: TelegramConfig) {
     },
 
     onToolCall: async (sessionId, tool) => {
-      if (!verboseMode) return;
       const tracking = activeSessions.get(sessionId);
       if (!tracking) return;
+
+      // Track Write calls during plan mode to find plan file
+      if (tracking.inPlanMode && tool.name === 'Write' && tool.input?.file_path) {
+        planFilePaths.set(sessionId, tool.input.file_path);
+      }
+
+      // Detect ExitPlanMode → read plan file + present action buttons
+      if (tool.name === 'ExitPlanMode') {
+        const planPath = planFilePaths.get(sessionId);
+        if (planPath) {
+          try {
+            const planContent = await readFile(planPath, 'utf-8');
+            const preview = planContent.length > 3500
+              ? planContent.substring(0, 3500) + '\n...(truncated)'
+              : planContent;
+            await sendChunkedMessage(
+              `${getSessionPrefix(sessionId)} 📋 *Plan ready:*\n\`\`\`\n${escTg(preview)}\n\`\`\``
+            );
+          } catch {
+            // Plan file might not be readable
+          }
+        }
+
+        // Present action buttons matching terminal prompt order:
+        // ❯ 1. Yes, clear context + bypass permissions
+        //   2. Yes, bypass permissions
+        //   3. Yes, manually approve edits
+        //   4. Type here to tell Claude what to change
+        const keyboard = new InlineKeyboard()
+          .text('1️⃣ Clear ctx + bypass', `plan_action_${sessionId}_1`)
+          .text('2️⃣ Bypass perms', `plan_action_${sessionId}_2`)
+          .text('3️⃣ Manual approve', `plan_action_${sessionId}_3`);
+        waitingForPlanAction.add(sessionId);
+        await sendMessage(
+          `${getSessionPrefix(sessionId)} Plan ready\\. Select action or type feedback:`,
+          'Markdown',
+          { reply_markup: keyboard }
+        );
+        planFilePaths.delete(sessionId);
+        return;
+      }
+
+      if (!verboseMode) return;
       const input = typeof tool.input === 'string'
         ? tool.input
         : JSON.stringify(tool.input, null, 2);
@@ -363,11 +411,23 @@ export function createTelegramApp(config: TelegramConfig) {
       const tracking = activeSessions.get(sessionId);
       if (!tracking) return;
 
-      const status = inPlanMode
-        ? 'Planning mode - Claude is designing a solution'
-        : 'Execution mode - Claude is implementing';
+      tracking.inPlanMode = inPlanMode;
+      if (!inPlanMode) {
+        waitingForPlanAction.delete(sessionId);
+        planFilePaths.delete(sessionId);
+      }
 
-      await sendMessage(`${getSessionPrefix(sessionId)} ${status}`);
+      if (inPlanMode) {
+        const keyboard = new InlineKeyboard()
+          .text('✅ Approve Plan', `plan_approve_${sessionId}`);
+        await sendMessage(
+          `${getSessionPrefix(sessionId)} 📋 *Planning mode* \\- Claude is designing a solution`,
+          'Markdown',
+          { reply_markup: keyboard }
+        );
+      } else {
+        await sendMessage(`${getSessionPrefix(sessionId)} 🔨 Execution mode \\- Claude is implementing`);
+      }
     },
   });
 
@@ -444,7 +504,9 @@ export function createTelegramApp(config: TelegramConfig) {
   function getSessionPrefix(sessionId: string): string {
     const tracking = activeSessions.get(sessionId);
     const name = tracking?.projectName || 'unknown';
-    return `_Claude Code (${name}):_`;
+    const busy = sessionManager.isSessionBusy(sessionId);
+    const indicator = busy ? '⏳' : '✅';
+    return `${indicator} _Claude Code (${name}):_`;
   }
 
   function getOtherSessionsSummary(excludeSessionId: string): string {
@@ -531,10 +593,13 @@ export function createTelegramApp(config: TelegramConfig) {
       const isActive = !!session;
       const isCurrent = current && session && session.sessionId === current.sessionId;
       const isPrimary = session && session.sessionId === primarySessionId;
-      const status = isActive ? '🟢' : '⚪';
+      const isBusy = session ? sessionManager.isSessionBusy(session.sessionId) : false;
+      const isPlanMode = session ? activeSessions.get(session.sessionId)?.inPlanMode : false;
+      const status = isActive ? (isBusy ? '⏳' : '🟢') : '⚪';
       const markers = [
         isCurrent ? '← current' : '',
         isPrimary ? '⭐' : '',
+        isPlanMode ? '📋plan' : '',
       ].filter(Boolean).join(' ');
       lines.push(`${num}. ${status} \`${name}\`${markers ? ` ${markers}` : ''}`);
       num++;
@@ -739,6 +804,84 @@ export function createTelegramApp(config: TelegramConfig) {
       await ctx.reply('Rewind cancelled.');
       return;
     }
+
+    // plan_approve_{sessionId} → approve plan (Shift+Tab)
+    if (data.startsWith('plan_approve_')) {
+      const sessionId = data.replace('plan_approve_', '');
+      const tracking = activeSessions.get(sessionId);
+      if (!tracking) {
+        await ctx.reply('Session not found.');
+        return;
+      }
+      if (!tracking.inPlanMode) {
+        await ctx.reply('Session is not in plan mode.');
+        return;
+      }
+      const sent = sessionManager.sendInput(sessionId, '\x1b[Z');
+      await ctx.reply(sent ? '✅ Plan approved' : 'Failed - session not connected.');
+      return;
+    }
+
+    // plan_action_{sessionId}_{number} → navigate interactive prompt with arrow keys + Enter
+    if (data.startsWith('plan_action_')) {
+      const rest = data.replace('plan_action_', '');
+      const lastUnderscore = rest.lastIndexOf('_');
+      const sessionId = rest.substring(0, lastUnderscore);
+      const choice = parseInt(rest.substring(lastUnderscore + 1), 10);
+      const labels: Record<number, string> = {
+        1: '✅ Clear context + bypass permissions',
+        2: '✅ Bypass permissions',
+        3: '✅ Manual approve',
+      };
+      // Interactive prompt uses arrow keys: option 1 is already selected (❯),
+      // so send (choice-1) Down arrows followed by Enter
+      const downArrow = '\x1b[B';
+      const input = downArrow.repeat(choice - 1) + '\n';
+      waitingForPlanAction.delete(sessionId);
+      const sent = sessionManager.sendInput(sessionId, input);
+      await ctx.reply(sent ? `${labels[choice] || `Option ${choice}`}` : 'Failed - session not connected.');
+      return;
+    }
+
+    // switch_select_{projectName} → switch to project
+    if (data.startsWith('switch_select_')) {
+      const projectName = data.replace('switch_select_', '');
+      const existing = await getSessionByProjectName(projectName);
+      if (existing) {
+        currentSessionId = existing.sessionId;
+        const list = await buildProjectList();
+        await ctx.reply(`Switched to: *${existing.projectName}*\n\n${list}`, { parse_mode: 'Markdown' });
+      } else {
+        const projects = await loadProjects();
+        const projectDir = projects.get(projectName);
+        if (!projectDir) {
+          await ctx.reply(`Project not found: \`${projectName}\``, { parse_mode: 'Markdown' });
+          return;
+        }
+        await ensureTmuxSession();
+        pendingSwitchProject = projectName;
+        await ctx.reply(`Starting \`${projectName}\`... (continue)`, { parse_mode: 'Markdown' });
+        const result = await createSessionInTmux(projectName, projectDir, { continueFlag: true });
+        if (!result.ok) {
+          pendingSwitchProject = null;
+          await ctx.reply(`Failed: ${result.error}`);
+        }
+      }
+      return;
+    }
+
+    // model_select_{name} → switch model
+    if (data.startsWith('model_select_')) {
+      const modelName = data.replace('model_select_', '');
+      const current = getCurrentSession();
+      if (!current) {
+        await ctx.reply('No active session.');
+        return;
+      }
+      const sent = sessionManager.sendInput(current.sessionId, `/model ${modelName}\n`);
+      await ctx.reply(sent ? `Sent /model ${modelName}` : 'Failed - session not connected.');
+      return;
+    }
   });
 
   // Handle incoming messages
@@ -759,6 +902,20 @@ export function createTelegramApp(config: TelegramConfig) {
 
     if (!current) {
       await ctx.reply('No active sessions. Use `/switch <project>` to start one.', { parse_mode: 'Markdown' });
+      return;
+    }
+
+    // If waiting for ExitPlanMode action, treat text as feedback (option 4)
+    if (waitingForPlanAction.has(current.sessionId)) {
+      waitingForPlanAction.delete(current.sessionId);
+      const downArrow = '\x1b[B';
+      // Select option 4 (3x Down + Enter), then type feedback after a short delay
+      const selectOption4 = downArrow.repeat(3) + '\n';
+      sessionManager.sendInput(current.sessionId, selectOption4);
+      setTimeout(() => {
+        sessionManager.sendInput(current.sessionId, text + '\n');
+      }, 500);
+      await ctx.reply('📝 Sending feedback...');
       return;
     }
 
@@ -798,7 +955,22 @@ export function createTelegramApp(config: TelegramConfig) {
       case '/select': {
         if (!sessionArg) {
           const list = await buildProjectList();
-          await ctx.reply(`${list}\n\nUse: \`/switch <project>\``, { parse_mode: 'Markdown' });
+          const projects = await loadProjects();
+          const keyboard = new InlineKeyboard();
+          const allNames: string[] = [];
+          for (const [name] of projects.entries()) {
+            allNames.push(name);
+            for (const [, fi] of forkRegistry) {
+              if (fi.baseProjectName === name && activeSessions.has(fi.forkSessionId)) {
+                allNames.push(fi.forkName);
+              }
+            }
+          }
+          for (let i = 0; i < allNames.length; i++) {
+            keyboard.text(allNames[i], `switch_select_${allNames[i]}`);
+            if ((i + 1) % 3 === 0) keyboard.row();
+          }
+          await ctx.reply(`${list}\n\nUse: \`/switch <project>\``, { parse_mode: 'Markdown', reply_markup: keyboard });
           return;
         }
 
@@ -984,12 +1156,31 @@ export function createTelegramApp(config: TelegramConfig) {
           await ctx.reply('No active session.');
           return;
         }
-        const name = targetSession.projectName;
-        await ctx.reply(`Killing session \`${name}\`...`, { parse_mode: 'Markdown' });
+        const killName = targetSession.projectName;
+        const killSessionId = targetSession.sessionId;
+        await ctx.reply(`Killing session \`${killName}\`...`, { parse_mode: 'Markdown' });
         try {
-          await execAsync(`tmux kill-window -t afk:${name}`);
+          await execAsync(`tmux kill-window -t afk:${killName}`);
         } catch { /* window may already be gone */ }
-        // onSessionEnd handles cleanup (auto-return to parent, forkRegistry, project list display)
+
+        // Immediate cleanup (onSessionEnd may fire later but is idempotent)
+        const killForkInfo = forkRegistry.get(killSessionId);
+        let killAutoReturn = '';
+        if (currentSessionId === killSessionId && killForkInfo) {
+          const parent = activeSessions.get(killForkInfo.parentSessionId);
+          if (parent) {
+            currentSessionId = killForkInfo.parentSessionId;
+            killAutoReturn = ` → \`${killForkInfo.parentProjectName}\``;
+          }
+        }
+        if (killForkInfo) forkRegistry.delete(killSessionId);
+        activeSessions.delete(killSessionId);
+        sessionMessageBuffers.delete(killSessionId);
+        if (primarySessionId === killSessionId) primarySessionId = null;
+        if (currentSessionId === killSessionId) currentSessionId = null;
+
+        const killList = await buildProjectList();
+        await sendMessage(`Session ended: ${killName}${killAutoReturn}\n\n${killList}`);
         break;
       }
 
@@ -1020,11 +1211,81 @@ export function createTelegramApp(config: TelegramConfig) {
         }
         const modelArg = args.join(' ');
         if (!modelArg) {
-          await ctx.reply('Usage: `/model <opus|sonnet|haiku>`', { parse_mode: 'Markdown' });
+          const keyboard = new InlineKeyboard()
+            .text('Opus', 'model_select_opus')
+            .text('Sonnet', 'model_select_sonnet')
+            .text('Haiku', 'model_select_haiku');
+          await ctx.reply('Select model:', { reply_markup: keyboard });
           return;
         }
         const sent = sessionManager.sendInput(targetSession.sessionId, `/model ${modelArg}\n`);
         await ctx.reply(sent ? `Sent /model ${modelArg}` : 'Failed - session not connected.');
+        break;
+      }
+
+      case '/l':
+      case '/last': {
+        if (sessionArg) {
+          // Show last 5 turns for specific project
+          const found = await getSessionByProjectName(sessionArg);
+          if (!found) {
+            await ctx.reply(`Project not found or not active: \`${escTg(sessionArg)}\``, { parse_mode: 'Markdown' });
+            return;
+          }
+          const jsonlPath = sessionManager.getWatchedFile(found.sessionId);
+          if (!jsonlPath) {
+            await ctx.reply(`\`${escTg(found.projectName)}\` has no conversation yet.`, { parse_mode: 'Markdown' });
+            return;
+          }
+          try {
+            const turns = await parseJsonlTurns(jsonlPath);
+            const recent = turns.slice(-5);
+            if (recent.length === 0) {
+              await ctx.reply('No turns found.');
+              return;
+            }
+            const lines = recent.map((t) => {
+              const time = new Date(t.timestamp).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+              const tools = t.toolCalls.length > 0 ? ` \\[${escTg(t.toolCalls.join(', '))}\\]` : '';
+              const msg = escTg(t.userMessage.substring(0, 100));
+              return `${t.turnNumber}\\. ${time} ${msg}${tools}`;
+            });
+            await sendChunkedMessage(`*Recent turns (${escTg(found.projectName)}):*\n${lines.join('\n')}`);
+          } catch (err: any) {
+            await ctx.reply(`Error: ${err.message}`);
+          }
+        } else {
+          // Show last 3 turns for all active sessions
+          if (activeSessions.size === 0) {
+            await ctx.reply('No active sessions.');
+            return;
+          }
+          const parts: string[] = [];
+          for (const [sid, tracking] of activeSessions.entries()) {
+            const jsonlPath = sessionManager.getWatchedFile(sid);
+            if (!jsonlPath) {
+              parts.push(`*${escTg(tracking.projectName)}:* _no conversation yet_`);
+              continue;
+            }
+            try {
+              const turns = await parseJsonlTurns(jsonlPath);
+              const recent = turns.slice(-3);
+              if (recent.length === 0) {
+                parts.push(`*${escTg(tracking.projectName)}:* _no turns_`);
+                continue;
+              }
+              const lines = recent.map((t) => {
+                const time = new Date(t.timestamp).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+                const msg = escTg(t.userMessage.substring(0, 80));
+                return `  ${t.turnNumber}\\. ${time} ${msg}`;
+              });
+              parts.push(`*${escTg(tracking.projectName)}:*\n${lines.join('\n')}`);
+            } catch {
+              parts.push(`*${escTg(tracking.projectName)}:* _error reading_`);
+            }
+          }
+          await sendChunkedMessage(parts.join('\n\n'));
+        }
         break;
       }
 
@@ -1116,6 +1377,7 @@ export function createTelegramApp(config: TelegramConfig) {
           `*AFK Code Commands:*\n\n` +
             `*Session:*\n` +
             `/switch (/s) <project> - Switch/start session\n` +
+            `/last (/l) [project] - Recent conversations\n` +
             `/rewind [project] - Rewind conversation\n` +
             `/fork (/f) [project] - Fork conversation\n` +
             `/model <name> - Switch model\n` +

@@ -468,6 +468,18 @@ export class SessionManager {
         const filePath = `${session.projectDir}/${filename}`;
         if (session.watchedFile && filePath === session.watchedFile) {
           await this.processJsonlUpdates(session);
+        } else if (session.watchedFile && filePath !== session.watchedFile) {
+          // A different JSONL file changed - check if the session switched files
+          // (happens on "clear context" which creates a new JSONL)
+          const newFile = await this.findActiveJsonlFile(session);
+          if (newFile && newFile !== session.watchedFile) {
+            console.log(`[SessionManager] JSONL file switched: ${session.watchedFile} -> ${newFile}`);
+            this.claimedFiles.delete(session.watchedFile);
+            session.watchedFile = newFile;
+            this.claimedFiles.add(newFile);
+            session.seenMessages.clear();
+            await this.processJsonlUpdates(session);
+          }
         }
       });
     } catch (err) {
@@ -486,6 +498,16 @@ export class SessionManager {
         if (newFile) {
           session.watchedFile = newFile;
           this.claimedFiles.add(newFile);
+        }
+      } else {
+        // Check if session switched to a new JSONL file (e.g. after "clear context")
+        const newFile = await this.findActiveJsonlFile(session);
+        if (newFile && newFile !== session.watchedFile) {
+          console.log(`[SessionManager] JSONL file switched (poll): ${session.watchedFile} -> ${newFile}`);
+          this.claimedFiles.delete(session.watchedFile);
+          session.watchedFile = newFile;
+          this.claimedFiles.add(newFile);
+          session.seenMessages.clear();
         }
       }
 
