@@ -134,10 +134,10 @@ export class HeartbeatEngine {
     }
 
     // Build and send heartbeat prompt
-    const prompt = await this.buildHeartbeatPrompt(sessionId);
+    const { prompt, header } = await this.buildHeartbeatPrompt(sessionId);
 
     if (this.config.silent_relay && this.callbacks.markSilent) {
-      this.callbacks.markSilent(prompt);
+      this.callbacks.markSilent(header);
     }
 
     const sent = this.callbacks.sendInput(sessionId, prompt);
@@ -156,13 +156,14 @@ export class HeartbeatEngine {
     return sent;
   }
 
-  private async buildHeartbeatPrompt(sessionId: string): Promise<string> {
+  private async buildHeartbeatPrompt(sessionId: string): Promise<{ prompt: string; header: string }> {
     const now = new Date();
     const dateStr = now.toISOString().split('T')[0];
     const timeStr = now.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
 
+    const header = `[HEARTBEAT #${this.state.beatCount + 1}] ${dateStr} ${timeStr}`;
     const lines = [
-      `[HEARTBEAT #${this.state.beatCount + 1}] ${dateStr} ${timeStr}`,
+      header,
       '',
       '~/.afk-code/HEARTBEAT.md を読んで、チェックリストに従い自律的に判断・行動してください。',
       `日次ノート: ~/.afk-code/memory/${dateStr}.md`,
@@ -178,7 +179,7 @@ export class HeartbeatEngine {
       }
     }
 
-    return lines.join('\n');
+    return { prompt: lines.join('\n'), header };
   }
 
   private async loadState(): Promise<void> {

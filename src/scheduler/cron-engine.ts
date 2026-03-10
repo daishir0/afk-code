@@ -95,7 +95,8 @@ export class CronEngine {
     const dateStr = now.toISOString().split('T')[0];
     const timeStr = now.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
 
-    let prompt = `[CRON: ${config.name}] ${dateStr} ${timeStr}\n\n${config.prompt}`;
+    const header = `[CRON: ${config.name}] ${dateStr} ${timeStr}`;
+    let prompt = `${header}\n\n${config.prompt}`;
 
     // Append cross-project context if available
     if (this.callbacks.getOtherSessionsSummary) {
@@ -106,7 +107,7 @@ export class CronEngine {
     }
 
     if (config.silent_relay && this.callbacks.markSilent) {
-      this.callbacks.markSilent(prompt);
+      this.callbacks.markSilent(header);
     }
 
     const sent = this.callbacks.sendInput(sessionId, prompt);

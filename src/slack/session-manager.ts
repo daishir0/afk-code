@@ -448,12 +448,10 @@ export class SessionManager {
           console.log(`[SessionManager] New message: session=${session.id.slice(0, 8)} role=${parsed.role} ts=${parsed.timestamp} len=${parsed.content.length}`);
 
           // Skip silent messages (Heartbeat/Cron prompts marked as silent)
-          // Use startsWith instead of exact match because Claude Code
-          // prepends/appends <system-reminder> tags to user messages in JSONL
+          // markSilent registers the header line; startsWith matches even if
+          // the JSONL content contains the full multi-line prompt
           if (parsed.role === 'user') {
-            const contentKey = parsed.content
-              .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
-              .trim();
+            const contentKey = parsed.content.trim();
             let matchedSilent: string | null = null;
             for (const silent of this.silentMessages) {
               if (contentKey.startsWith(silent)) {
