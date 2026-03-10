@@ -18,12 +18,40 @@ async function main() {
         console.error('Example: afk-code run -- claude');
         process.exit(1);
       }
+      const runFlags = args.slice(1, separatorIndex);
+      const shouldRestart = runFlags.includes('--restart');
       const cmd = args.slice(separatorIndex + 1);
       if (cmd.length === 0) {
         console.error('No command specified after --');
         process.exit(1);
       }
-      await run(cmd);
+
+      if (shouldRestart) {
+        let stopRestart = false;
+        process.on('SIGINT', () => { stopRestart = true; });
+        process.on('SIGTERM', () => { stopRestart = true; });
+
+        let attempt = 0;
+        while (!stopRestart) {
+          attempt++;
+          const startTime = Date.now();
+          console.log(`[AutoRestart] Starting session (attempt ${attempt})...`);
+          await run(cmd);
+          if (stopRestart) break;
+
+          const elapsed = Date.now() - startTime;
+          const delay = elapsed < 15_000 ? 30_000 : 5_000;
+          console.log(`[AutoRestart] Session exited after ${Math.round(elapsed / 1000)}s. Restarting in ${delay / 1000}s...`);
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, delay);
+            process.once('SIGINT', () => { clearTimeout(timer); stopRestart = true; resolve(); });
+            process.once('SIGTERM', () => { clearTimeout(timer); stopRestart = true; resolve(); });
+          });
+        }
+        console.log('[AutoRestart] Stopped.');
+      } else {
+        await run(cmd);
+      }
       break;
     }
 
@@ -93,7 +121,8 @@ Commands:
   discord setup      Configure Discord integration
   slack              Run the Slack bot
   slack setup        Configure Slack integration
-  run -- <command>   Start a monitored session
+  run -- <command>            Start a monitored session
+  run --restart -- <command>  Start a monitored session with auto-restart
   init               Initialize memory & personality files
   heartbeat <cmd>    Heartbeat management (status/enable/disable)
   cron <cmd>         Cron job management (list)
@@ -105,7 +134,8 @@ Examples:
   afk-code init              # Initialize ~/.afk-code/ files
   afk-code telegram setup    # First-time Telegram configuration
   afk-code telegram          # Start Telegram bot + Heartbeat + Cron
-  afk-code run -- claude     # Start a Claude Code session
+  afk-code run -- claude                           # Start a Claude Code session
+  afk-code run --restart -- claude --continue      # Auto-restart on exit
   afk-code heartbeat status  # Check Heartbeat status
   afk-code status            # Show overall system status
 `);

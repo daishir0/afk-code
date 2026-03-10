@@ -51,6 +51,7 @@ export function createTelegramApp(config: TelegramConfig) {
   let verboseMode = false; // Show tool calls/results in Telegram
   const planFilePaths = new Map<string, string>(); // sessionId -> last written file path during plan mode
   const waitingForPlanAction = new Set<string>(); // sessionIds waiting for ExitPlanMode user choice
+  const handledExitPlanModeIds = new Set<string>(); // dedup ExitPlanMode across JSONL re-processing
 
   // Fork tracking
   interface ForkInfo {
@@ -344,13 +345,15 @@ export function createTelegramApp(config: TelegramConfig) {
       const tracking = activeSessions.get(sessionId);
       if (!tracking) return;
 
-      // Track Write calls during plan mode to find plan file
-      if (tracking.inPlanMode && tool.name === 'Write' && tool.input?.file_path) {
+      // Track Write/Edit calls during plan mode to find plan file
+      if (tracking.inPlanMode && (tool.name === 'Write' || tool.name === 'Edit') && tool.input?.file_path) {
         planFilePaths.set(sessionId, tool.input.file_path);
       }
 
       // Detect ExitPlanMode → read plan file + present action buttons
       if (tool.name === 'ExitPlanMode') {
+        if (handledExitPlanModeIds.has(tool.id)) return;
+        handledExitPlanModeIds.add(tool.id);
         const planPath = planFilePaths.get(sessionId);
         if (planPath) {
           try {
@@ -361,8 +364,8 @@ export function createTelegramApp(config: TelegramConfig) {
             await sendChunkedMessage(
               `${getSessionPrefix(sessionId)} 📋 *Plan ready:*\n\`\`\`\n${escTg(preview)}\n\`\`\``
             );
-          } catch {
-            // Plan file might not be readable
+          } catch (err) {
+            console.error(`[Telegram] Failed to read plan file: ${planPath}`, err);
           }
         }
 
