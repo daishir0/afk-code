@@ -62,6 +62,51 @@ export class CronEngine {
     console.log('[Cron] Stopped');
   }
 
+  reload(newConfigs: CronJobConfig[]): void {
+    const newMap = new Map(newConfigs.map(c => [c.id, c]));
+
+    // 削除されたジョブを停止
+    for (const [id, job] of this.jobs) {
+      if (!newMap.has(id)) {
+        job.task.stop();
+        this.jobs.delete(id);
+        console.log(`[Cron] Removed job '${job.config.name}'`);
+      }
+    }
+
+    // 追加・変更ジョブを処理
+    for (const config of newConfigs) {
+      const existing = this.jobs.get(config.id);
+      const changed = !existing ||
+        existing.config.schedule !== config.schedule ||
+        existing.config.prompt !== config.prompt ||
+        existing.config.enabled !== config.enabled ||
+        existing.config.silent_relay !== config.silent_relay;
+
+      if (!changed) continue;
+
+      if (existing) {
+        existing.task.stop();
+        this.jobs.delete(config.id);
+      }
+
+      if (!config.enabled) {
+        console.log(`[Cron] Job '${config.name}' disabled`);
+        continue;
+      }
+      if (!cron.validate(config.schedule)) {
+        console.error(`[Cron] Invalid schedule for '${config.name}': ${config.schedule}`);
+        continue;
+      }
+
+      const task = cron.schedule(config.schedule, () => this.executeJob(config), {
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      });
+      this.jobs.set(config.id, { config, task });
+      console.log(`[Cron] ${existing ? 'Updated' : 'Added'} job '${config.name}' (${config.schedule})`);
+    }
+  }
+
   listJobs(): Array<{ id: string; name: string; schedule: string; enabled: boolean }> {
     return Array.from(this.jobs.values()).map((job) => ({
       id: job.config.id,
