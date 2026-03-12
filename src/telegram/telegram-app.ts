@@ -1238,6 +1238,16 @@ export function createTelegramApp(config: TelegramConfig) {
         break;
       }
 
+      case '/clear': {
+        if (!targetSession) {
+          await ctx.reply('No active session.');
+          return;
+        }
+        const sent = sessionManager.sendInput(targetSession.sessionId, '/clear\n');
+        await ctx.reply(sent ? 'Sent /clear — context cleared.' : 'Failed - session not connected.');
+        break;
+      }
+
       case '/model': {
         if (!targetSession) {
           await ctx.reply('No active session.');
@@ -1416,6 +1426,7 @@ export function createTelegramApp(config: TelegramConfig) {
             `/fork (/f) [project] - Fork conversation\n` +
             `/model <name> - Switch model\n` +
             `/compact - Compact conversation\n` +
+            `/clear - Clear context completely\n` +
             `/background (/bg) - Send Ctrl+B\n` +
             `/interrupt (/) - Send Escape\n` +
             `/kill - Kill current session\n` +
@@ -1440,6 +1451,27 @@ export function createTelegramApp(config: TelegramConfig) {
         break;
     }
   }
+
+  // Session stuck watchdog: if primary session has no output for > 2 hours,
+  // send Ctrl+C to snap it out of a stuck API call or context compaction.
+  const WATCHDOG_INTERVAL_MS = 10 * 60 * 1000; // check every 10 min
+  const STALE_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
+
+  setInterval(() => {
+    if (!primarySessionId || !activeSessions.has(primarySessionId)) return;
+    const lastOutput = sessionManager.getLastOutputTime(primarySessionId);
+    const staleMs = Date.now() - lastOutput;
+    if (lastOutput > 0 && staleMs > STALE_THRESHOLD_MS) {
+      const staleMin = Math.round(staleMs / 60_000);
+      console.log(`[Watchdog] Primary session stale for ${staleMin}min - sending interrupt`);
+      sessionManager.sendInput(primarySessionId, '\x03');
+      sendMessage(
+        `⚠️ *Watchdog*: プライマリセッションが ${staleMin} 分間無応答のため Ctrl+C を送信しました`,
+        'Markdown',
+        { disable_notification: true }
+      );
+    }
+  }, WATCHDOG_INTERVAL_MS);
 
   return { bot, sessionManager, scheduler };
 }
