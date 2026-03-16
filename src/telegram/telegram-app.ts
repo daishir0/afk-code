@@ -1452,24 +1452,56 @@ export function createTelegramApp(config: TelegramConfig) {
     }
   }
 
-  // Session stuck watchdog: if primary session has no output for > 2 hours,
-  // send Ctrl+C to snap it out of a stuck API call or context compaction.
+  // Session stuck watchdog:
+  // True stuck = last JSONL message was role:user AND no assistant response for > threshold.
+  // role:assistant (or null) = idle/waiting → not stuck, ignore.
+  // When truly stuck, additionally compare screen captures:
+  //   - Screen changed → processing (thinking etc.) → notify only
+  //   - Screen unchanged → fully frozen → Ctrl+C once + notify
   const WATCHDOG_INTERVAL_MS = 10 * 60 * 1000; // check every 10 min
   const STALE_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
+  let lastWatchdogScreen: string | null = null;
 
-  setInterval(() => {
+  setInterval(async () => {
     if (!primarySessionId || !activeSessions.has(primarySessionId)) return;
-    const lastOutput = sessionManager.getLastOutputTime(primarySessionId);
-    const staleMs = Date.now() - lastOutput;
-    if (lastOutput > 0 && staleMs > STALE_THRESHOLD_MS) {
+
+    // Only trigger if the last JSONL message was from the user (Claude should be responding)
+    const lastRole = sessionManager.getLastMessageRole(primarySessionId);
+    if (lastRole !== 'user') {
+      lastWatchdogScreen = null;
+      return;
+    }
+
+    const lastUserTime = sessionManager.getLastUserMessageTime(primarySessionId);
+    const staleMs = Date.now() - lastUserTime;
+    if (lastUserTime > 0 && staleMs > STALE_THRESHOLD_MS) {
       const staleMin = Math.round(staleMs / 60_000);
-      console.log(`[Watchdog] Primary session stale for ${staleMin}min - sending interrupt`);
-      sessionManager.sendInput(primarySessionId, '\x03');
-      sendMessage(
-        `⚠️ *Watchdog*: プライマリセッションが ${staleMin} 分間無応答のため Ctrl+C を送信しました`,
-        'Markdown',
-        { disable_notification: true }
-      );
+      const screen = await sessionManager.captureScreen(primarySessionId);
+      const screenText = screen
+        ? `\`\`\`\n${screen.slice(-1500)}\n\`\`\``
+        : '_(画面キャプチャ取得失敗)_';
+
+      const isTrulyFrozen = screen !== null && screen === lastWatchdogScreen;
+      lastWatchdogScreen = screen;
+
+      if (isTrulyFrozen) {
+        // Screen unchanged → fully frozen → send Ctrl+C once
+        console.log(`[Watchdog] Stuck ${staleMin}min, screen frozen - sending single Ctrl+C`);
+        sessionManager.sendInput(primarySessionId, '\x03');
+        sendMessage(
+          `🔴 *Watchdog*: ユーザー入力から *${staleMin} 分間*応答なし、画面も停止\nCtrl+C を1回送信しました\n\n*画面:*\n${screenText}`,
+          'Markdown',
+          { disable_notification: true }
+        );
+      } else {
+        // Screen changed → thinking/processing → notify only
+        console.log(`[Watchdog] Stuck ${staleMin}min, screen still changing - notify only`);
+        sendMessage(
+          `⚠️ *Watchdog*: ユーザー入力から *${staleMin} 分間*応答なし（画面は変化中・thinking中の可能性）\n\n*画面:*\n${screenText}`,
+          'Markdown',
+          { disable_notification: true }
+        );
+      }
     }
   }, WATCHDOG_INTERVAL_MS);
 

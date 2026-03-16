@@ -33,6 +33,14 @@ export interface CronConfig {
   jobs: CronJobConfig[];
 }
 
+export interface RelayConfig {
+  suppressUserMessagePrefixes: string[];
+}
+
+const DEFAULT_RELAY_CONFIG: RelayConfig = {
+  suppressUserMessagePrefixes: [],
+};
+
 const DEFAULT_HEARTBEAT_CONFIG: HeartbeatConfig = {
   enabled: true,
   interval_minutes: 30,
@@ -64,6 +72,18 @@ export async function loadHeartbeatConfig(): Promise<HeartbeatConfig> {
     };
   } catch {
     return DEFAULT_HEARTBEAT_CONFIG;
+  }
+}
+
+export async function loadRelayConfig(): Promise<RelayConfig> {
+  try {
+    const content = await readFile(`${AFK_CODE_DIR}/config.yaml`, 'utf-8');
+    const data = YAML.parse(content);
+    const prefixes = data?.relay?.suppress_user_message_prefixes;
+    if (!Array.isArray(prefixes)) return DEFAULT_RELAY_CONFIG;
+    return { suppressUserMessagePrefixes: prefixes };
+  } catch {
+    return DEFAULT_RELAY_CONFIG;
   }
 }
 

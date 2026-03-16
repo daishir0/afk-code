@@ -12,6 +12,23 @@ function getClaudeProjectDir(cwd: string): string {
   return `${homedir()}/.claude/projects/${encodedPath}`;
 }
 
+// Strip ANSI escape codes from terminal output
+function stripAnsi(str: string): string {
+  // eslint-disable-next-line no-control-regex
+  return str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b[()][AB012]/g, '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+}
+
+// Rolling screen buffer: keeps last SCREEN_BUFFER_CHARS chars of PTY output (ANSI stripped)
+const SCREEN_BUFFER_CHARS = 3000;
+let screenBuffer = '';
+
+function appendToScreenBuffer(data: string): void {
+  screenBuffer += stripAnsi(data);
+  if (screenBuffer.length > SCREEN_BUFFER_CHARS) {
+    screenBuffer = screenBuffer.slice(screenBuffer.length - SCREEN_BUFFER_CHARS);
+  }
+}
+
 // Connect to daemon and maintain bidirectional communication
 function connectToDaemon(
   sessionId: string,
@@ -19,7 +36,7 @@ function connectToDaemon(
   cwd: string,
   command: string[],
   onInput: (text: string) => void
-): Promise<{ close: () => void } | null> {
+): Promise<{ close: () => void; socket: Socket } | null> {
   return new Promise((resolve) => {
     const socket = createConnection(DAEMON_SOCKET);
     let messageBuffer = '';
@@ -40,6 +57,7 @@ function connectToDaemon(
           socket.write(JSON.stringify({ type: 'session_end', sessionId }) + '\n');
           socket.end();
         },
+        socket,
       });
     });
 
@@ -55,6 +73,8 @@ function connectToDaemon(
           const msg = JSON.parse(line);
           if (msg.type === 'input' && msg.text) {
             onInput(msg.text);
+          } else if (msg.type === 'screen_request') {
+            socket.write(JSON.stringify({ type: 'screen_response', content: screenBuffer }) + '\n');
           }
         } catch {}
       }
@@ -118,6 +138,7 @@ export async function run(command: string[]): Promise<void> {
   ptyProcess.onData((data: string) => {
     stopSpinner();
     process.stdout.write(data);
+    appendToScreenBuffer(data);
   });
 
   const onStdinData = (data: Buffer) => {

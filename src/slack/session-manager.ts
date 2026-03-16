@@ -8,6 +8,7 @@ import { readdir, readFile, stat, unlink, mkdir } from 'fs/promises';
 import { createServer, type Server, type Socket } from 'net';
 import { createHash } from 'crypto';
 import type { TodoItem } from '../types.js';
+import { loadRelayConfig } from '../scheduler/config-loader.js';
 
 const DAEMON_SOCKET = '/tmp/afk-code-daemon.sock';
 
@@ -30,6 +31,8 @@ interface InternalSession extends SessionInfo {
   inPlanMode: boolean;
   initialFileStats: Map<string, number>; // path -> mtime at session start
   lastOutputTime: number; // timestamp of last JSONL output
+  lastMessageRole: 'user' | 'assistant' | null; // role of the last JSONL message
+  lastUserMessageTime: number; // timestamp when the last user message was written
 }
 
 export interface ChatMessage {
@@ -70,6 +73,7 @@ export class SessionManager {
   private sessions = new Map<string, InternalSession>();
   private claimedFiles = new Set<string>();
   private silentMessages = new Set<string>();
+  private suppressUserMessagePrefixes: string[] = [];
   private events: SessionEvents;
   private server: Server | null = null;
 
@@ -82,6 +86,11 @@ export class SessionManager {
   }
 
   async start(): Promise<void> {
+    // Load relay config (suppress prefixes)
+    const relayConfig = await loadRelayConfig();
+    this.suppressUserMessagePrefixes = relayConfig.suppressUserMessagePrefixes;
+    console.log(`[SessionManager] Relay suppress prefixes: ${this.suppressUserMessagePrefixes.length} entries`);
+
     // Remove old socket file
     try {
       await unlink(DAEMON_SOCKET);
@@ -228,6 +237,57 @@ export class SessionManager {
     return elapsed < 30_000; // Busy if output within last 30 seconds
   }
 
+  getLastOutputTime(sessionId: string): number {
+    return this.sessions.get(sessionId)?.lastOutputTime ?? 0;
+  }
+
+  getLastMessageRole(sessionId: string): 'user' | 'assistant' | null {
+    return this.sessions.get(sessionId)?.lastMessageRole ?? null;
+  }
+
+  getLastUserMessageTime(sessionId: string): number {
+    return this.sessions.get(sessionId)?.lastUserMessageTime ?? 0;
+  }
+
+  captureScreen(sessionId: string, timeoutMs = 5000): Promise<string | null> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return Promise.resolve(null);
+
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        session.socket.removeListener('data', onData);
+        resolve(null);
+      }, timeoutMs);
+
+      let buf = '';
+      const onData = (data: Buffer) => {
+        buf += data.toString();
+        const lines = buf.split('\n');
+        buf = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const msg = JSON.parse(line);
+            if (msg.type === 'screen_response') {
+              clearTimeout(timer);
+              session.socket.removeListener('data', onData);
+              resolve(msg.content ?? '');
+            }
+          } catch {}
+        }
+      };
+
+      session.socket.on('data', onData);
+      try {
+        session.socket.write(JSON.stringify({ type: 'screen_request' }) + '\n');
+      } catch {
+        clearTimeout(timer);
+        session.socket.removeListener('data', onData);
+        resolve(null);
+      }
+    });
+  }
+
   private async handleSessionMessage(socket: Socket, message: any): Promise<void> {
     switch (message.type) {
       case 'session_start': {
@@ -248,6 +308,8 @@ export class SessionManager {
           inPlanMode: false,
           initialFileStats,
           lastOutputTime: Date.now(),
+          lastMessageRole: null,
+          lastUserMessageTime: 0,
         };
 
         this.sessions.set(message.id, session);
@@ -445,6 +507,8 @@ export class SessionManager {
           if (messageTime < session.startedAt) continue;
 
           session.lastOutputTime = Date.now();
+          session.lastMessageRole = parsed.role;
+          if (parsed.role === 'user') session.lastUserMessageTime = Date.now();
           console.log(`[SessionManager] New message: session=${session.id.slice(0, 8)} role=${parsed.role} ts=${parsed.timestamp} len=${parsed.content.length}`);
 
           // Skip silent messages (Heartbeat/Cron prompts marked as silent)
@@ -462,6 +526,15 @@ export class SessionManager {
             if (matchedSilent) {
               console.log(`[SessionManager] Silent match: skipping user message (silent set size: ${this.silentMessages.size})`);
               this.silentMessages.delete(matchedSilent);
+              continue;
+            }
+
+            // Skip system-injected messages (configured in ~/.afk-code/config.yaml)
+            const isSuppressed = this.suppressUserMessagePrefixes.some((prefix) =>
+              contentKey.startsWith(prefix)
+            );
+            if (isSuppressed) {
+              console.log(`[SessionManager] Suppressed system message: ${contentKey.slice(0, 60)}...`);
               continue;
             }
           }
