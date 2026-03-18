@@ -35,10 +35,12 @@ export interface CronConfig {
 
 export interface RelayConfig {
   suppressUserMessagePrefixes: string[];
+  suppressAssistantMessagePrefixes: string[];
 }
 
 const DEFAULT_RELAY_CONFIG: RelayConfig = {
   suppressUserMessagePrefixes: [],
+  suppressAssistantMessagePrefixes: [],
 };
 
 const DEFAULT_HEARTBEAT_CONFIG: HeartbeatConfig = {
@@ -79,9 +81,12 @@ export async function loadRelayConfig(): Promise<RelayConfig> {
   try {
     const content = await readFile(`${AFK_CODE_DIR}/config.yaml`, 'utf-8');
     const data = YAML.parse(content);
-    const prefixes = data?.relay?.suppress_user_message_prefixes;
-    if (!Array.isArray(prefixes)) return DEFAULT_RELAY_CONFIG;
-    return { suppressUserMessagePrefixes: prefixes };
+    const userPrefixes = data?.relay?.suppress_user_message_prefixes;
+    const assistantPrefixes = data?.relay?.suppress_assistant_message_prefixes;
+    return {
+      suppressUserMessagePrefixes: Array.isArray(userPrefixes) ? userPrefixes : [],
+      suppressAssistantMessagePrefixes: Array.isArray(assistantPrefixes) ? assistantPrefixes : [],
+    };
   } catch {
     return DEFAULT_RELAY_CONFIG;
   }

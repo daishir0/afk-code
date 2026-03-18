@@ -1,0 +1,15 @@
+relay:
+  # userロールのメッセージがこのプレフィックスで始まる場合は全中継先にスキップ
+  # Claude Codeが自動注入するシステムメッセージなどを抑制するために使用
+  suppress_user_message_prefixes:
+    - "<task-notification>"
+    - "<local-command-caveat>"
+    - "<command-name>"
+    - "<local-command-stdout>"
+    # CRONジョブのプロンプトを中継しない例
+    # - "[CRON: my-job-name]"
+
+  # assistantロール（Claudeの返答）がこのプレフィックスで始まる場合は全中継先にスキップ
+  # 定期実行ジョブの出力など、チャットに流したくないメッセージを抑制するために使用
+  suppress_assistant_message_prefixes:
+    - "📰 ニュース:"

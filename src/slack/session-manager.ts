@@ -74,6 +74,7 @@ export class SessionManager {
   private claimedFiles = new Set<string>();
   private silentMessages = new Set<string>();
   private suppressUserMessagePrefixes: string[] = [];
+  private suppressAssistantMessagePrefixes: string[] = [];
   private events: SessionEvents;
   private server: Server | null = null;
 
@@ -89,7 +90,8 @@ export class SessionManager {
     // Load relay config (suppress prefixes)
     const relayConfig = await loadRelayConfig();
     this.suppressUserMessagePrefixes = relayConfig.suppressUserMessagePrefixes;
-    console.log(`[SessionManager] Relay suppress prefixes: ${this.suppressUserMessagePrefixes.length} entries`);
+    this.suppressAssistantMessagePrefixes = relayConfig.suppressAssistantMessagePrefixes;
+    console.log(`[SessionManager] Relay suppress prefixes: ${this.suppressUserMessagePrefixes.length} user, ${this.suppressAssistantMessagePrefixes.length} assistant entries`);
 
     // Remove old socket file
     try {
@@ -535,6 +537,17 @@ export class SessionManager {
             );
             if (isSuppressed) {
               console.log(`[SessionManager] Suppressed system message: ${contentKey.slice(0, 60)}...`);
+              continue;
+            }
+          }
+
+          if (parsed.role === 'assistant') {
+            const assistantKey = parsed.content.trim();
+            const isAssistantSuppressed = this.suppressAssistantMessagePrefixes.some((prefix) =>
+              assistantKey.startsWith(prefix)
+            );
+            if (isAssistantSuppressed) {
+              console.log(`[SessionManager] Suppressed assistant message: ${assistantKey.slice(0, 60)}...`);
               continue;
             }
           }
