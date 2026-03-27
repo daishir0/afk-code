@@ -51,6 +51,7 @@ export function createTelegramApp(config: TelegramConfig) {
   let verboseMode = false; // Show tool calls/results in Telegram
   const planFilePaths = new Map<string, string>(); // sessionId -> last written file path during plan mode
   const waitingForPlanAction = new Set<string>(); // sessionIds waiting for ExitPlanMode user choice
+  const waitingForPermission = new Set<string>(); // sessionIds waiting for permission prompt user choice
   const handledExitPlanModeIds = new Set<string>(); // dedup ExitPlanMode across JSONL re-processing
 
   // Fork tracking
@@ -436,6 +437,23 @@ export function createTelegramApp(config: TelegramConfig) {
       } else {
         await sendMessage(`${getSessionPrefix(sessionId)} 🔨 Execution mode \\- Claude is implementing`);
       }
+    },
+
+    onPermissionPrompt: async (sessionId, content) => {
+      // Show recent terminal context (last few lines) so user can see what's being asked
+      const lines = content.trim().split('\n').filter(Boolean);
+      const preview = lines.slice(-10).join('\n');
+      const keyboard = new InlineKeyboard()
+        .text('1️⃣ Yes', `perm_action_${sessionId}_1`)
+        .text('2️⃣ Yes + allow session', `perm_action_${sessionId}_2`)
+        .row()
+        .text('3️⃣ No', `perm_action_${sessionId}_3`);
+      waitingForPermission.add(sessionId);
+      await sendMessage(
+        `${getSessionPrefix(sessionId)} 🔐 *Permission required*\n\`\`\`\n${escTg(preview)}\n\`\`\``,
+        'Markdown',
+        { reply_markup: keyboard }
+      );
     },
   });
 
@@ -870,6 +888,27 @@ export function createTelegramApp(config: TelegramConfig) {
       return;
     }
 
+    // perm_action_{sessionId}_{number} → respond to permission prompt
+    if (data.startsWith('perm_action_')) {
+      const rest = data.replace('perm_action_', '');
+      const lastUnderscore = rest.lastIndexOf('_');
+      const sessionId = rest.substring(0, lastUnderscore);
+      const choice = parseInt(rest.substring(lastUnderscore + 1), 10);
+      const labels: Record<number, string> = {
+        1: '✅ Yes',
+        2: '✅ Yes + allow for session',
+        3: '❌ No',
+      };
+      // Permission prompt: option 1 (Yes) is already selected (❯),
+      // so send (choice-1) Down arrows followed by Enter
+      const downArrow = '\x1b[B';
+      const input = downArrow.repeat(choice - 1) + '\n';
+      waitingForPermission.delete(sessionId);
+      const sent = sessionManager.sendInput(sessionId, input);
+      await ctx.reply(sent ? `${labels[choice] || `Option ${choice}`}` : 'Failed - session not connected.');
+      return;
+    }
+
     // switch_select_{projectName} → switch to project
     if (data.startsWith('switch_select_')) {
       const projectName = data.replace('switch_select_', '');
@@ -930,6 +969,11 @@ export function createTelegramApp(config: TelegramConfig) {
     if (!current) {
       await ctx.reply('No active sessions. Use `/switch <project>` to start one.', { parse_mode: 'Markdown' });
       return;
+    }
+
+    // If waiting for permission prompt, clear the state (user chose to type instead)
+    if (waitingForPermission.has(current.sessionId)) {
+      waitingForPermission.delete(current.sessionId);
     }
 
     // If waiting for ExitPlanMode action, treat text as feedback (option 4)

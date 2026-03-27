@@ -63,6 +63,7 @@ export interface SessionEvents {
   onToolCall: (sessionId: string, tool: ToolCallInfo) => void;
   onToolResult: (sessionId: string, result: ToolResultInfo) => void;
   onPlanModeChange: (sessionId: string, inPlanMode: boolean) => void;
+  onPermissionPrompt: (sessionId: string, content: string) => void;
 }
 
 function hash(data: string): string {
@@ -338,6 +339,15 @@ export class SessionManager {
           this.stopWatching(session);
           this.sessions.delete(message.sessionId);
           this.events.onSessionEnd(message.sessionId);
+        }
+        break;
+      }
+
+      case 'permission_prompt': {
+        const session = this.sessions.get(message.sessionId);
+        if (session) {
+          console.log(`[SessionManager] Permission prompt detected: ${message.sessionId}`);
+          this.events.onPermissionPrompt(message.sessionId, message.content || '');
         }
         break;
       }

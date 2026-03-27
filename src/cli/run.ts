@@ -22,6 +22,17 @@ function stripAnsi(str: string): string {
 const SCREEN_BUFFER_CHARS = 3000;
 let screenBuffer = '';
 
+// Permission prompt detection
+const PERMISSION_PATTERNS = [
+  /Do you want to make this edit/,
+  /Claude needs your permission/,
+  /Do you want to proceed/,
+  /Do you want to execute/,
+  /Do you want to run/,
+];
+let lastPermissionNotifyTime = 0;
+const PERMISSION_NOTIFY_COOLDOWN = 5000; // 5s cooldown to avoid spam
+
 function appendToScreenBuffer(data: string): void {
   screenBuffer += stripAnsi(data);
   if (screenBuffer.length > SCREEN_BUFFER_CHARS) {
@@ -139,6 +150,29 @@ export async function run(command: string[]): Promise<void> {
     stopSpinner();
     process.stdout.write(data);
     appendToScreenBuffer(data);
+
+    // Detect permission prompts and notify daemon
+    if (daemon) {
+      const stripped = stripAnsi(data);
+      const now = Date.now();
+      if (now - lastPermissionNotifyTime > PERMISSION_NOTIFY_COOLDOWN) {
+        for (const pattern of PERMISSION_PATTERNS) {
+          if (pattern.test(stripped)) {
+            // Extract recent context from screen buffer for the notification
+            const context = screenBuffer.slice(-500);
+            try {
+              daemon.socket.write(JSON.stringify({
+                type: 'permission_prompt',
+                sessionId,
+                content: context,
+              }) + '\n');
+            } catch {}
+            lastPermissionNotifyTime = now;
+            break;
+          }
+        }
+      }
+    }
   });
 
   const onStdinData = (data: Buffer) => {
