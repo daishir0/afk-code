@@ -241,6 +241,10 @@ export function createSlackApp(config: SlackConfig) {
         console.error('[Slack] Failed to post plan mode change:', err);
       }
     },
+
+    onPermissionPrompt: async (_sessionId, _content) => {
+      // Permission prompt handling is only implemented in Telegram
+    },
   });
 
   // Handle messages in session channels (user sending input to Claude)
