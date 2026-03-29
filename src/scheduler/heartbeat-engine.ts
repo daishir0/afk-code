@@ -21,7 +21,6 @@ export interface HeartbeatCallbacks {
   isSessionBusy: (sessionId: string) => boolean;
   sendInput: (sessionId: string, text: string) => boolean;
   notify: (message: string) => void;
-  markSilent?: (content: string) => void;
   getOtherSessionsSummary?: (excludeSessionId: string) => string;
 }
 
@@ -135,10 +134,6 @@ export class HeartbeatEngine {
 
     // Build and send heartbeat prompt
     const { prompt, header } = await this.buildHeartbeatPrompt(sessionId);
-
-    if (this.config.silent_relay && this.callbacks.markSilent) {
-      this.callbacks.markSilent(header);
-    }
 
     const sent = this.callbacks.sendInput(sessionId, prompt);
 

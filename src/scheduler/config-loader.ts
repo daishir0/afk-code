@@ -17,7 +17,6 @@ export interface HeartbeatConfig {
     end: number;
   };
   max_consecutive_skips: number;
-  silent_relay: boolean;
 }
 
 export interface CronJobConfig {
@@ -26,7 +25,6 @@ export interface CronJobConfig {
   schedule: string;
   prompt: string;
   enabled: boolean;
-  silent_relay: boolean;
 }
 
 export interface CronConfig {
@@ -36,11 +34,15 @@ export interface CronConfig {
 export interface RelayConfig {
   suppressUserMessagePrefixes: string[];
   suppressAssistantMessagePrefixes: string[];
+  suppressUserMessageContains: string[];
+  suppressAssistantMessageContains: string[];
 }
 
 const DEFAULT_RELAY_CONFIG: RelayConfig = {
   suppressUserMessagePrefixes: [],
   suppressAssistantMessagePrefixes: [],
+  suppressUserMessageContains: [],
+  suppressAssistantMessageContains: [],
 };
 
 const DEFAULT_HEARTBEAT_CONFIG: HeartbeatConfig = {
@@ -48,7 +50,6 @@ const DEFAULT_HEARTBEAT_CONFIG: HeartbeatConfig = {
   interval_minutes: 30,
   quiet_hours: { start: 23, end: 7 },
   max_consecutive_skips: 3,
-  silent_relay: true,
 };
 
 const DEFAULT_CRON_CONFIG: CronConfig = {
@@ -70,7 +71,6 @@ export async function loadHeartbeatConfig(): Promise<HeartbeatConfig> {
       },
       max_consecutive_skips:
         data.heartbeat.max_consecutive_skips ?? DEFAULT_HEARTBEAT_CONFIG.max_consecutive_skips,
-      silent_relay: data.heartbeat.silent_relay ?? DEFAULT_HEARTBEAT_CONFIG.silent_relay,
     };
   } catch {
     return DEFAULT_HEARTBEAT_CONFIG;
@@ -83,9 +83,13 @@ export async function loadRelayConfig(): Promise<RelayConfig> {
     const data = YAML.parse(content);
     const userPrefixes = data?.relay?.suppress_user_message_prefixes;
     const assistantPrefixes = data?.relay?.suppress_assistant_message_prefixes;
+    const userContains = data?.relay?.suppress_user_message_contains;
+    const assistantContains = data?.relay?.suppress_assistant_message_contains;
     return {
       suppressUserMessagePrefixes: Array.isArray(userPrefixes) ? userPrefixes : [],
       suppressAssistantMessagePrefixes: Array.isArray(assistantPrefixes) ? assistantPrefixes : [],
+      suppressUserMessageContains: Array.isArray(userContains) ? userContains : [],
+      suppressAssistantMessageContains: Array.isArray(assistantContains) ? assistantContains : [],
     };
   } catch {
     return DEFAULT_RELAY_CONFIG;
@@ -105,7 +109,6 @@ export async function loadCronConfig(): Promise<CronConfig> {
         schedule: job.schedule || '0 * * * *',
         prompt: job.prompt || '',
         enabled: job.enabled !== false,
-        silent_relay: job.silent_relay === true,
       })),
     };
   } catch {

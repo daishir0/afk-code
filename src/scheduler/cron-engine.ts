@@ -16,7 +16,6 @@ export interface CronCallbacks {
   isSessionBusy: (sessionId: string) => boolean;
   sendInput: (sessionId: string, text: string) => boolean;
   notify: (message: string) => void;
-  markSilent?: (content: string) => void;
   getOtherSessionsSummary?: (excludeSessionId: string) => string;
 }
 
@@ -80,8 +79,7 @@ export class CronEngine {
       const changed = !existing ||
         existing.config.schedule !== config.schedule ||
         existing.config.prompt !== config.prompt ||
-        existing.config.enabled !== config.enabled ||
-        existing.config.silent_relay !== config.silent_relay;
+        existing.config.enabled !== config.enabled;
 
       if (!changed) continue;
 
@@ -149,10 +147,6 @@ export class CronEngine {
       if (otherContext) {
         prompt += '\n' + otherContext;
       }
-    }
-
-    if (config.silent_relay && this.callbacks.markSilent) {
-      this.callbacks.markSilent(header);
     }
 
     const sent = this.callbacks.sendInput(sessionId, prompt);

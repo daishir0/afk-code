@@ -73,9 +73,6 @@ function hash(data: string): string {
 export class SessionManager {
   private sessions = new Map<string, InternalSession>();
   private claimedFiles = new Set<string>();
-  private silentMessages = new Set<string>();
-  private suppressUserMessagePrefixes: string[] = [];
-  private suppressAssistantMessagePrefixes: string[] = [];
   private events: SessionEvents;
   private server: Server | null = null;
 
@@ -83,17 +80,7 @@ export class SessionManager {
     this.events = events;
   }
 
-  markSilent(content: string): void {
-    this.silentMessages.add(content.trim());
-  }
-
   async start(): Promise<void> {
-    // Load relay config (suppress prefixes)
-    const relayConfig = await loadRelayConfig();
-    this.suppressUserMessagePrefixes = relayConfig.suppressUserMessagePrefixes;
-    this.suppressAssistantMessagePrefixes = relayConfig.suppressAssistantMessagePrefixes;
-    console.log(`[SessionManager] Relay suppress prefixes: ${this.suppressUserMessagePrefixes.length} user, ${this.suppressAssistantMessagePrefixes.length} assistant entries`);
-
     // Remove old socket file
     try {
       await unlink(DAEMON_SOCKET);
@@ -523,41 +510,42 @@ export class SessionManager {
           if (parsed.role === 'user') session.lastUserMessageTime = Date.now();
           console.log(`[SessionManager] New message: session=${session.id.slice(0, 8)} role=${parsed.role} ts=${parsed.timestamp} len=${parsed.content.length}`);
 
-          // Skip silent messages (Heartbeat/Cron prompts marked as silent)
-          // markSilent registers the header line; startsWith matches even if
-          // the JSONL content contains the full multi-line prompt
+          // Skip messages matching suppress rules (re-read config.yaml each time)
+          const relayConfig = await loadRelayConfig();
           if (parsed.role === 'user') {
             const contentKey = parsed.content.trim();
-            let matchedSilent: string | null = null;
-            for (const silent of this.silentMessages) {
-              if (contentKey.startsWith(silent)) {
-                matchedSilent = silent;
-                break;
-              }
-            }
-            if (matchedSilent) {
-              console.log(`[SessionManager] Silent match: skipping user message (silent set size: ${this.silentMessages.size})`);
-              this.silentMessages.delete(matchedSilent);
-              continue;
-            }
-
-            // Skip system-injected messages (configured in ~/.afk-code/config.yaml)
-            const isSuppressed = this.suppressUserMessagePrefixes.some((prefix) =>
+            const isSuppressed = relayConfig.suppressUserMessagePrefixes.some((prefix) =>
               contentKey.startsWith(prefix)
             );
             if (isSuppressed) {
               console.log(`[SessionManager] Suppressed system message: ${contentKey.slice(0, 60)}...`);
               continue;
             }
+
+            const isContainsSuppressed = relayConfig.suppressUserMessageContains.some((keyword) =>
+              contentKey.includes(keyword)
+            );
+            if (isContainsSuppressed) {
+              console.log(`[SessionManager] Suppressed (contains) user message: ${contentKey.slice(0, 60)}...`);
+              continue;
+            }
           }
 
           if (parsed.role === 'assistant') {
             const assistantKey = parsed.content.trim();
-            const isAssistantSuppressed = this.suppressAssistantMessagePrefixes.some((prefix) =>
+            const isAssistantSuppressed = relayConfig.suppressAssistantMessagePrefixes.some((prefix) =>
               assistantKey.startsWith(prefix)
             );
             if (isAssistantSuppressed) {
               console.log(`[SessionManager] Suppressed assistant message: ${assistantKey.slice(0, 60)}...`);
+              continue;
+            }
+
+            const isAssistantContainsSuppressed = relayConfig.suppressAssistantMessageContains.some((keyword) =>
+              assistantKey.includes(keyword)
+            );
+            if (isAssistantContainsSuppressed) {
+              console.log(`[SessionManager] Suppressed (contains) assistant message: ${assistantKey.slice(0, 60)}...`);
               continue;
             }
           }

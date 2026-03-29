@@ -38,8 +38,6 @@ export class Scheduler {
       sendInput: (sessionId: string, text: string) =>
         this.options.sessionManager.sendInput(sessionId, text),
       notify: this.options.notify,
-      markSilent: (content: string) =>
-        this.options.sessionManager.markSilent(content),
       getOtherSessionsSummary: this.options.getOtherSessionsSummary,
     };
 
