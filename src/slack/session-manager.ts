@@ -97,12 +97,15 @@ export class SessionManager {
 
         for (const line of lines) {
           if (!line.trim()) continue;
+          let parsed: any;
           try {
-            const parsed = JSON.parse(line);
-            this.handleSessionMessage(socket, parsed);
+            parsed = JSON.parse(line);
           } catch (error) {
             console.error('[SessionManager] Error parsing message:', error);
+            continue;
           }
+          this.handleSessionMessage(socket, parsed)
+            .catch((error) => console.error('[SessionManager] Error handling message:', error));
         }
       });
 
@@ -117,7 +120,8 @@ export class SessionManager {
             console.log(`[SessionManager] Session disconnected: ${id}`);
             this.stopWatching(session);
             this.sessions.delete(id);
-            this.events.onSessionEnd(id);
+            Promise.resolve(this.events.onSessionEnd(id))
+              .catch(err => console.error('[SessionManager] onSessionEnd error:', err));
             break;
           }
         }
@@ -154,7 +158,8 @@ export class SessionManager {
       // Socket is dead, clean up
       this.stopWatching(session);
       this.sessions.delete(sessionId);
-      this.events.onSessionEnd(sessionId);
+      Promise.resolve(this.events.onSessionEnd(sessionId))
+        .catch(err => console.error('[SessionManager] onSessionEnd error:', err));
       return false;
     }
 
@@ -306,14 +311,14 @@ export class SessionManager {
         console.log(`[SessionManager] Session started: ${message.id} - ${session.name}`);
         console.log(`[SessionManager] Snapshot: ${initialFileStats.size} existing JSONL files`);
 
-        this.events.onSessionStart({
+        Promise.resolve(this.events.onSessionStart({
           id: session.id,
           name: session.name,
           cwd: session.cwd,
           projectDir: session.projectDir,
           status: session.status,
           startedAt: session.startedAt,
-        });
+        })).catch(err => console.error('[SessionManager] onSessionStart error:', err));
 
         this.startWatching(session);
         break;
@@ -325,7 +330,8 @@ export class SessionManager {
           console.log(`[SessionManager] Session ended: ${message.sessionId}`);
           this.stopWatching(session);
           this.sessions.delete(message.sessionId);
-          this.events.onSessionEnd(message.sessionId);
+          Promise.resolve(this.events.onSessionEnd(message.sessionId))
+            .catch(err => console.error('[SessionManager] onSessionEnd error:', err));
         }
         break;
       }
@@ -334,7 +340,8 @@ export class SessionManager {
         const session = this.sessions.get(message.sessionId);
         if (session) {
           console.log(`[SessionManager] Permission prompt detected: ${message.sessionId}`);
-          this.events.onPermissionPrompt(message.sessionId, message.content || '');
+          Promise.resolve(this.events.onPermissionPrompt(message.sessionId, message.content || ''))
+            .catch(err => console.error('[SessionManager] onPermissionPrompt error:', err));
         }
         break;
       }
@@ -465,7 +472,8 @@ export class SessionManager {
             session.slugFound = true;
             session.name = slug;
             console.log(`[SessionManager] Session ${session.id} name: ${slug}`);
-            this.events.onSessionUpdate(session.id, slug);
+            Promise.resolve(this.events.onSessionUpdate(session.id, slug))
+              .catch(err => console.error('[SessionManager] onSessionUpdate error:', err));
           }
         }
 
@@ -475,7 +483,8 @@ export class SessionManager {
           const todosHash = hash(JSON.stringify(todos));
           if (todosHash !== session.lastTodosHash) {
             session.lastTodosHash = todosHash;
-            this.events.onTodos(session.id, todos);
+            Promise.resolve(this.events.onTodos(session.id, todos))
+              .catch(err => console.error('[SessionManager] onTodos error:', err));
           }
         }
 
@@ -484,19 +493,22 @@ export class SessionManager {
         if (planModeStatus !== null && planModeStatus !== session.inPlanMode) {
           session.inPlanMode = planModeStatus;
           console.log(`[SessionManager] Session ${session.id} plan mode: ${planModeStatus}`);
-          this.events.onPlanModeChange(session.id, planModeStatus);
+          Promise.resolve(this.events.onPlanModeChange(session.id, planModeStatus))
+            .catch(err => console.error('[SessionManager] onPlanModeChange error:', err));
         }
 
         // Extract tool calls from assistant messages
         const toolCalls = this.extractToolCalls(line);
         for (const tool of toolCalls) {
-          this.events.onToolCall(session.id, tool);
+          Promise.resolve(this.events.onToolCall(session.id, tool))
+            .catch(err => console.error('[SessionManager] onToolCall error:', err));
         }
 
         // Extract tool results from user messages
         const toolResults = this.extractToolResults(line);
         for (const result of toolResults) {
-          this.events.onToolResult(session.id, result);
+          Promise.resolve(this.events.onToolResult(session.id, result))
+            .catch(err => console.error('[SessionManager] onToolResult error:', err));
         }
 
         // Parse and forward messages
@@ -551,7 +563,8 @@ export class SessionManager {
           }
 
           console.log(`[SessionManager] Forwarding: session=${session.id.slice(0, 8)} role=${parsed.role}`);
-          this.events.onMessage(session.id, parsed.role, parsed.content);
+          Promise.resolve(this.events.onMessage(session.id, parsed.role, parsed.content))
+            .catch(err => console.error('[SessionManager] onMessage error:', err));
         }
       }
     } catch (err) {
