@@ -609,6 +609,39 @@ export function createTelegramApp(config: TelegramConfig) {
     return null;
   }
 
+  /** /rewind, /fork 用: 会話ファイルを持つセッションとそのパスを返す。
+   *  watchedFile が未設定（再起動後など）の場合はファイルシステムから直接探す。 */
+  async function getSessionsWithConversation(): Promise<Array<{ tracking: SessionTracking; jsonlPath: string }>> {
+    const results: Array<{ tracking: SessionTracking; jsonlPath: string }> = [];
+    for (const tracking of activeSessions.values()) {
+      const watched = sessionManager.getWatchedFile(tracking.sessionId);
+      if (watched) {
+        results.push({ tracking, jsonlPath: watched });
+        continue;
+      }
+      // Fallback: scan filesystem (e.g. after bot restart when watchedFile is not yet set)
+      const sessionInfo = sessionManager.getSession(tracking.sessionId);
+      if (!sessionInfo?.projectDir) continue;
+      try {
+        const files = await readdir(sessionInfo.projectDir);
+        const jsonlFiles = files.filter((f) => f.endsWith('.jsonl') && !f.startsWith('agent-'));
+        if (jsonlFiles.length === 0) continue;
+        const withStats = await Promise.all(
+          jsonlFiles.map(async (f) => {
+            const p = `${sessionInfo.projectDir}/${f}`;
+            const s = await stat(p);
+            return { path: p, mtime: s.mtimeMs };
+          })
+        );
+        withStats.sort((a, b) => b.mtime - a.mtime);
+        results.push({ tracking, jsonlPath: withStats[0].path });
+      } catch {
+        // projectDir not accessible
+      }
+    }
+    return results;
+  }
+
   async function buildProjectList(): Promise<string> {
     const projects = await loadProjects();
     if (projects.size === 0) return 'No projects configured.';
@@ -1111,10 +1144,25 @@ export function createTelegramApp(config: TelegramConfig) {
           await ctx.reply('No active session.');
           return;
         }
-        const jsonlPath = sessionManager.getWatchedFile(targetSession.sessionId);
+        let jsonlPath = sessionManager.getWatchedFile(targetSession.sessionId);
         if (!jsonlPath) {
-          await ctx.reply(`\`${targetSession.projectName}\` has no conversation yet. Send a message first.`, { parse_mode: 'Markdown' });
-          return;
+          const withConv = await getSessionsWithConversation();
+          if (withConv.length === 0) {
+            await ctx.reply('No conversations found in any session.');
+            return;
+          }
+          if (withConv.length === 1) {
+            targetSession = withConv[0].tracking;
+            jsonlPath = withConv[0].jsonlPath;
+            await ctx.reply(`\`${targetSession.projectName}\` に自動切り替えました。`, { parse_mode: 'Markdown' });
+          } else {
+            const list = withConv.map(({ tracking: t }) => `• \`${t.projectName}\` → /rewind ${t.projectName}`).join('\n');
+            await ctx.reply(
+              `\`${targetSession.projectName}\` has no conversation yet.\n\nSessions with conversations:\n${list}`,
+              { parse_mode: 'Markdown' }
+            );
+            return;
+          }
         }
         let recentTurns: ParsedTurn[];
         try {
@@ -1161,10 +1209,25 @@ export function createTelegramApp(config: TelegramConfig) {
           await ctx.reply('No active session.');
           return;
         }
-        const jsonlPath = sessionManager.getWatchedFile(targetSession.sessionId);
+        let jsonlPath = sessionManager.getWatchedFile(targetSession.sessionId);
         if (!jsonlPath) {
-          await ctx.reply(`\`${targetSession.projectName}\` has no conversation yet. Send a message first.`, { parse_mode: 'Markdown' });
-          return;
+          const withConv = await getSessionsWithConversation();
+          if (withConv.length === 0) {
+            await ctx.reply('No conversations found in any session.');
+            return;
+          }
+          if (withConv.length === 1) {
+            targetSession = withConv[0].tracking;
+            jsonlPath = withConv[0].jsonlPath;
+            await ctx.reply(`\`${targetSession.projectName}\` に自動切り替えました。`, { parse_mode: 'Markdown' });
+          } else {
+            const list = withConv.map(({ tracking: t }) => `• \`${t.projectName}\` → /fork ${t.projectName}`).join('\n');
+            await ctx.reply(
+              `\`${targetSession.projectName}\` has no conversation yet.\n\nSessions with conversations:\n${list}`,
+              { parse_mode: 'Markdown' }
+            );
+            return;
+          }
         }
         const session = sessionManager.getSession(targetSession.sessionId);
         if (!session) {
