@@ -945,6 +945,25 @@ export function createTelegramApp(config: TelegramConfig) {
 
     // key_* → send navigation key sequences
     if (data.startsWith('key_')) {
+      // Screen capture
+      if (data === 'key_screen') {
+        const current = getCurrentSession();
+        if (!current) {
+          await ctx.answerCallbackQuery({ text: 'No active session.' });
+          return;
+        }
+        const screen = await sessionManager.captureScreen(current.sessionId);
+        if (screen === null) {
+          await ctx.answerCallbackQuery({ text: 'Failed to capture screen.' });
+          return;
+        }
+        const trimmed = screen.slice(-3000);
+        await ctx.reply(`\`\`\`\n${trimmed}\n\`\`\``, { parse_mode: 'Markdown' });
+        await ctx.answerCallbackQuery();
+        return;
+      }
+
+      // Navigation keys
       const keyMap: Record<string, string> = {
         key_up:    '\x1b[A',
         key_down:  '\x1b[B',
@@ -1299,21 +1318,7 @@ export function createTelegramApp(config: TelegramConfig) {
         break;
       }
 
-      case '/keys':
-      case '/k': {
-        const current = getCurrentSession();
-        if (!current) { await ctx.reply('No active session.'); return; }
-        const keyboard = new InlineKeyboard()
-          .text('↑', 'key_up').row()
-          .text('←', 'key_left').text('↓', 'key_down').text('→', 'key_right').row()
-          .text('ESC', 'key_esc').text('↵ Enter', 'key_enter');
-        await ctx.reply('🎮 Key Input', { reply_markup: keyboard });
-        break;
-      }
-
-      case '/':
-      case '/interrupt':
-      case '/stop': {
+      case '//': {
         if (!targetSession) {
           await ctx.reply('No active session.');
           return;
@@ -1324,6 +1329,17 @@ export function createTelegramApp(config: TelegramConfig) {
         }
         const sent = sessionManager.sendInput(targetSession.sessionId, '\x1b');
         await ctx.reply(sent ? 'Sent interrupt (Escape)' : 'Failed - session not connected.');
+        break;
+      }
+
+      case '/': {
+        const current = getCurrentSession();
+        if (!current) { await ctx.reply('No active session.'); return; }
+        const keyboard = new InlineKeyboard()
+          .text('↑', 'key_up').row()
+          .text('←', 'key_left').text('↓', 'key_down').text('→', 'key_right').row()
+          .text('ESC', 'key_esc').text('↵ Enter', 'key_enter').text('📷', 'key_screen');
+        await ctx.reply('🎮 Key Input', { reply_markup: keyboard });
         break;
       }
 
@@ -1390,22 +1406,6 @@ export function createTelegramApp(config: TelegramConfig) {
         }
         const sent = sessionManager.sendInput(targetSession.sessionId, '/clear\n');
         await ctx.reply(sent ? 'Sent /clear — context cleared.' : 'Failed - session not connected.');
-        break;
-      }
-
-      case '/sc':
-      case '/screen': {
-        if (!targetSession) {
-          await ctx.reply('No active session.');
-          return;
-        }
-        const screen = await sessionManager.captureScreen(targetSession.sessionId);
-        if (screen === null) {
-          await ctx.reply('Failed to capture screen (timeout or session not connected).');
-          return;
-        }
-        const trimmed = screen.slice(-3000);
-        await ctx.reply(`\`\`\`\n${trimmed}\n\`\`\``, { parse_mode: 'Markdown' });
         break;
       }
 
@@ -1588,9 +1588,9 @@ export function createTelegramApp(config: TelegramConfig) {
             `/model <name> - Switch model\n` +
             `/compact - Compact conversation\n` +
             `/clear - Clear context completely\n` +
-            `/screen (/sc) - Capture current screen\n` +
             `/background (/bg) - Send Ctrl+B\n` +
-            `/interrupt (/) - Send Escape\n` +
+            `// - Send Escape (interrupt)\n` +
+            `/ - Key input pad (↑↓←→ ESC Enter 📷 Screen)\n` +
             `/kill - Kill current session\n` +
             `/mode - Toggle mode (Shift+Tab)\n` +
             `/verbose (/v) - Toggle tool call/result display\n\n` +
@@ -1600,7 +1600,6 @@ export function createTelegramApp(config: TelegramConfig) {
             `/cron - List cron jobs\n` +
             `/memory - Show MEMORY.md\n` +
             `/soul - Show SOUL.md\n\n` +
-            `/keys (/k) - Arrow key input pad (↑↓←→ ESC Enter)\n` +
             `/help - Show this message\n\n` +
             `_Messages go to the current session._\n` +
             `_⭐ = primary session (heartbeat/cron target)_`,
