@@ -1297,6 +1297,22 @@ export function createTelegramApp(config: TelegramConfig) {
         break;
       }
 
+      case '/sc':
+      case '/screen': {
+        if (!targetSession) {
+          await ctx.reply('No active session.');
+          return;
+        }
+        const screen = await sessionManager.captureScreen(targetSession.sessionId);
+        if (screen === null) {
+          await ctx.reply('Failed to capture screen (timeout or session not connected).');
+          return;
+        }
+        const trimmed = screen.slice(-3000);
+        await ctx.reply(`\`\`\`\n${trimmed}\n\`\`\``, { parse_mode: 'Markdown' });
+        break;
+      }
+
       case '/model': {
         if (!targetSession) {
           await ctx.reply('No active session.');
@@ -1476,6 +1492,7 @@ export function createTelegramApp(config: TelegramConfig) {
             `/model <name> - Switch model\n` +
             `/compact - Compact conversation\n` +
             `/clear - Clear context completely\n` +
+            `/screen (/sc) - Capture current screen\n` +
             `/background (/bg) - Send Ctrl+B\n` +
             `/interrupt (/) - Send Escape\n` +
             `/kill - Kill current session\n` +
