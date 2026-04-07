@@ -46,6 +46,7 @@ export function createTelegramApp(config: TelegramConfig) {
   }>>();
   const MESSAGE_BUFFER_SIZE = 10;
   let currentSessionId: string | null = null; // Explicitly selected session
+  let userExplicitlySelected = false; // True after user has explicitly switched to a session
   let primarySessionId: string | null = null; // First session started (Heartbeat/Cron target)
   let pendingSwitchProject: string | null = null; // Project name awaiting session start
   let verboseMode = false; // Show tool calls/results in Telegram
@@ -517,7 +518,7 @@ export function createTelegramApp(config: TelegramConfig) {
         extraArgs += ' --continue';
       }
       const escapedDir = dir.replace(/'/g, "'\\''");
-      const cmd = `cd '${escapedDir}' && (source ~/.nvm/nvm.sh 2>/dev/null || true) && afk-code run -- claude --dangerously-skip-permissions${extraArgs}`;
+      const cmd = `unset CLAUDECODE; cd '${escapedDir}' && (source ~/.nvm/nvm.sh 2>/dev/null || true) && afk-code run --restart -- claude --dangerously-skip-permissions${extraArgs}`;
       const escapedCmd = cmd.replace(/'/g, "'\\''");
       await execAsync(`tmux new-window -t afk -n '${name}' '${escapedCmd}'`);
       return { ok: true };
@@ -569,8 +570,8 @@ export function createTelegramApp(config: TelegramConfig) {
       return activeSessions.values().next().value ?? null;
     }
 
-    // Fallback to most recent session
-    if (activeSessions.size > 1) {
+    // Fallback to most recent session (only if user has never explicitly selected)
+    if (activeSessions.size > 1 && !userExplicitlySelected) {
       return getMostRecentSession();
     }
 
@@ -915,6 +916,7 @@ export function createTelegramApp(config: TelegramConfig) {
       const existing = await getSessionByProjectName(projectName);
       if (existing) {
         currentSessionId = existing.sessionId;
+        userExplicitlySelected = true;
         const list = await buildProjectList();
         await ctx.reply(`Switched to: *${existing.projectName}*\n\n${list}`, { parse_mode: 'Markdown' });
       } else {
@@ -925,6 +927,7 @@ export function createTelegramApp(config: TelegramConfig) {
           return;
         }
         await ensureTmuxSession();
+        userExplicitlySelected = true;
         pendingSwitchProject = projectName;
         await ctx.reply(`Starting \`${projectName}\`... (continue)`, { parse_mode: 'Markdown' });
         const result = await createSessionInTmux(projectName, projectDir, { continueFlag: true });
@@ -1063,6 +1066,7 @@ export function createTelegramApp(config: TelegramConfig) {
         const existing = await getSessionByProjectName(projectName);
         if (existing) {
           currentSessionId = existing.sessionId;
+          userExplicitlySelected = true;
           const list = await buildProjectList();
           await ctx.reply(`Switched to: *${existing.projectName}*\n\n${list}`, { parse_mode: 'Markdown' });
           return;
@@ -1087,6 +1091,7 @@ export function createTelegramApp(config: TelegramConfig) {
 
         await ensureTmuxSession();
 
+        userExplicitlySelected = true;
         pendingSwitchProject = projectName;
         await ctx.reply(`Starting \`${projectName}\`...${newFlag ? ' (new)' : ' (continue)'}`, { parse_mode: 'Markdown' });
         const result = await createSessionInTmux(projectName, projectDir, { continueFlag });
