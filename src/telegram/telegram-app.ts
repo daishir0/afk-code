@@ -943,6 +943,27 @@ export function createTelegramApp(config: TelegramConfig) {
       return;
     }
 
+    // key_* → send navigation key sequences
+    if (data.startsWith('key_')) {
+      const keyMap: Record<string, string> = {
+        key_up:    '\x1b[A',
+        key_down:  '\x1b[B',
+        key_left:  '\x1b[D',
+        key_right: '\x1b[C',
+        key_esc:   '\x1b',
+        key_enter: '\r',
+      };
+      const seq = keyMap[data];
+      if (seq) {
+        const current = getCurrentSession();
+        if (current) {
+          sessionManager.sendInput(current.sessionId, seq);
+        }
+      }
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
     // switch_select_{projectName} → switch to project
     if (data.startsWith('switch_select_')) {
       const projectName = data.replace('switch_select_', '');
@@ -1278,6 +1299,18 @@ export function createTelegramApp(config: TelegramConfig) {
         break;
       }
 
+      case '/keys':
+      case '/k': {
+        const current = getCurrentSession();
+        if (!current) { await ctx.reply('No active session.'); return; }
+        const keyboard = new InlineKeyboard()
+          .text('↑', 'key_up').row()
+          .text('←', 'key_left').text('↓', 'key_down').text('→', 'key_right').row()
+          .text('ESC', 'key_esc').text('↵ Enter', 'key_enter');
+        await ctx.reply('🎮 Key Input', { reply_markup: keyboard });
+        break;
+      }
+
       case '/':
       case '/interrupt':
       case '/stop': {
@@ -1567,6 +1600,7 @@ export function createTelegramApp(config: TelegramConfig) {
             `/cron - List cron jobs\n` +
             `/memory - Show MEMORY.md\n` +
             `/soul - Show SOUL.md\n\n` +
+            `/keys (/k) - Arrow key input pad (↑↓←→ ESC Enter)\n` +
             `/help - Show this message\n\n` +
             `_Messages go to the current session._\n` +
             `_⭐ = primary session (heartbeat/cron target)_`,
