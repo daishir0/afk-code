@@ -135,8 +135,9 @@ export class CronEngine {
     }
 
     const now = new Date();
-    const dateStr = now.toISOString().split('T')[0];
-    const timeStr = now.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const dateStr = now.toLocaleDateString('sv-SE', { timeZone: tz });
+    const timeStr = now.toLocaleTimeString('ja-JP', { timeZone: tz, hour: '2-digit', minute: '2-digit' });
 
     const header = `[CRON: ${config.name}] ${dateStr} ${timeStr}`;
     let prompt = `${header}\n\n${config.prompt}`;
