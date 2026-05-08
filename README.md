@@ -108,7 +108,6 @@ afk    # 下記「tmux ショートカット」参照
 │  └── Cron Engine（crontab 式、hot reload 対応）              │
 ├──────────────────────────────────────────────────────────────┤
 │  AutoRestart Loop（クラッシュ時に自動再起動）                │
-│  Watchdog（セッション停止検出）                              │
 │  File Logger（~/.afk-code/logs/、7 日ローテーション）        │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -347,7 +346,6 @@ Claude Code が確認を求めたとき、Telegram から直接応答できま�
 | **AutoRestart ループ** | Telegram ボットがクラッシュすると自動再起動。クイッククラッシュ（<10s）は 45 秒待機（Telegram の 30 秒 long-poll タイムアウト超え）で 409 Conflict を回避 |
 | **getUpdates プリコール** | 起動時に古い long-poll 接続をクリアしてから `bot.start()` を呼び出す |
 | **Unix socket 自動再接続** | `afk-code run` が daemon との接続を失うと 5 秒ごとに自動再試行 |
-| **Watchdog** | セッション応答なし・無音状態を検出して報告 |
 | **OOM ガード** | メッセージバッファが 50MB を超えると古いデータを削除 |
 | **seenMessages エビクション** | 重複排除キャッシュ上限 50,000 件（超過時に古いものを削除） |
 | **File Logger** | `~/.afk-code/logs/telegram-YYYY-MM-DD.log` に全ログを記録（7 日保持）。uncaughtException / unhandledRejection もキャプチャ |
@@ -693,7 +691,6 @@ Side systems:
 │  └── Cron Engine (crontab-style, hot reload)            │
 ├──────────────────────────────────────────────────────────┤
 │  AutoRestart Loop (auto-recovery on crash)               │
-│  Watchdog (detects session stalls)                       │
 │  File Logger (~/.afk-code/logs/, 7-day rotation)        │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -919,7 +916,6 @@ Respond to Claude Code's prompts directly from Telegram.
 | **AutoRestart loop** | Telegram bot restarts automatically on crash. Quick crashes (<10s) wait 45s before restarting (longer than Telegram's 30s long-poll TTL, preventing 409 Conflict) |
 | **getUpdates pre-call** | Clears stale long-poll connections before `bot.start()` to prevent 409 errors |
 | **Unix socket auto-reconnect** | `afk-code run` retries connection to the daemon every 5 seconds on disconnect |
-| **Watchdog** | Detects unresponsive or silent sessions and reports them |
 | **OOM guard** | Message buffers are capped at 50MB; old data is evicted on overflow |
 | **seenMessages eviction** | Deduplication cache capped at 50,000 entries |
 | **File logger** | All logs written to `~/.afk-code/logs/telegram-YYYY-MM-DD.log` with 7-day rotation. `uncaughtException` and `unhandledRejection` are captured with full stack traces |

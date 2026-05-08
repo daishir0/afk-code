@@ -19,3 +19,7 @@ scheduler-state.json
 # OS files
 .DS_Store
 Thumbs.db
+
+# Output files & backups
+outputs/
+*.bak
