@@ -149,7 +149,7 @@ export class CronEngine {
       }
     }
 
-    const sent = this.callbacks.sendInput(sessionId, prompt);
+    const sent = this.callbacks.sendInput(sessionId, prompt + '\r');
 
     if (sent) {
       console.log(`[Cron] Executed job '${config.name}'`);

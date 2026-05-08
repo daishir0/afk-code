@@ -4,7 +4,9 @@
  * and provides backup/truncation helpers.
  */
 
-import { readFile, writeFile, copyFile } from 'fs/promises';
+import { createReadStream, createWriteStream } from 'fs';
+import { writeFile, copyFile } from 'fs/promises';
+import { createInterface } from 'readline';
 
 export interface ParsedTurn {
   turnNumber: number;       // 1-indexed
@@ -16,42 +18,52 @@ export interface ParsedTurn {
 }
 
 /**
- * Parse a JSONL file into turns.
+ * Parse a JSONL file into turns using streaming to avoid OOM on large files.
  * Turn boundary: type:"user" with string content (not tool_result arrays).
  * Meta lines (isMeta, subtype, file-history-snapshot) are not turn boundaries.
  */
 export function parseJsonlTurns(jsonlPath: string): Promise<ParsedTurn[]> {
-  return readFile(jsonlPath, 'utf-8').then((content) => {
-    const lines = content.split('\n').filter(Boolean);
+  return new Promise((resolve, reject) => {
     const turns: ParsedTurn[] = [];
     let currentTurn: ParsedTurn | null = null;
+    let lineIndex = 0;
 
-    for (let i = 0; i < lines.length; i++) {
+    const rl = createInterface({
+      input: createReadStream(jsonlPath, { encoding: 'utf-8' }),
+      crlfDelay: Infinity,
+    });
+
+    rl.on('line', (line) => {
+      if (!line.trim()) {
+        lineIndex++;
+        return;
+      }
+
       let data: any;
       try {
-        data = JSON.parse(lines[i]);
+        data = JSON.parse(line);
       } catch {
-        continue;
+        lineIndex++;
+        return;
       }
+
+      const i = lineIndex;
 
       // Skip meta lines
       if (data.isMeta || data.subtype || data.type === 'file-history-snapshot') {
-        // Still extend current turn's endLineIndex
         if (currentTurn) currentTurn.endLineIndex = i;
-        continue;
+        lineIndex++;
+        return;
       }
 
       // Check for user turn boundary
       if (data.type === 'user') {
         const content = data.message?.content;
-        // Only string content is a turn boundary (not tool_result arrays)
         if (typeof content === 'string') {
-          // Finalize previous turn
           if (currentTurn) {
             turns.push(currentTurn);
           }
 
-          // Extract display text
           const cleanContent = content
             .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
             .trim();
@@ -67,7 +79,8 @@ export function parseJsonlTurns(jsonlPath: string): Promise<ParsedTurn[]> {
             endLineIndex: i,
             toolCalls: [],
           };
-          continue;
+          lineIndex++;
+          return;
         }
       }
 
@@ -85,18 +98,18 @@ export function parseJsonlTurns(jsonlPath: string): Promise<ParsedTurn[]> {
         }
       }
 
-      // Extend current turn's endLineIndex
       if (currentTurn) {
         currentTurn.endLineIndex = i;
       }
-    }
+      lineIndex++;
+    });
 
-    // Push final turn
-    if (currentTurn) {
-      turns.push(currentTurn);
-    }
+    rl.on('close', () => {
+      if (currentTurn) turns.push(currentTurn);
+      resolve(turns);
+    });
 
-    return turns;
+    rl.on('error', reject);
   });
 }
 
@@ -112,24 +125,54 @@ export async function backupJsonl(path: string): Promise<string> {
 
 /**
  * Truncate a JSONL file to include only lines up to endLineIndex (inclusive).
+ * Uses streaming to avoid OOM on large files.
  */
 export async function truncateJsonlToLine(path: string, endLineIndex: number): Promise<void> {
-  const content = await readFile(path, 'utf-8');
-  const lines = content.split('\n').filter(Boolean);
-  const truncated = lines.slice(0, endLineIndex + 1).join('\n') + '\n';
-  await writeFile(path, truncated, 'utf-8');
+  const lines = await readLinesUpTo(path, endLineIndex);
+  await writeFile(path, lines.join('\n') + '\n', 'utf-8');
 }
 
 /**
  * Copy a JSONL file truncated to endLineIndex into a new destination.
+ * Uses streaming to avoid OOM on large files.
  */
 export async function copyJsonlTruncated(
   src: string,
   dest: string,
   endLineIndex: number
 ): Promise<void> {
-  const content = await readFile(src, 'utf-8');
-  const lines = content.split('\n').filter(Boolean);
-  const truncated = lines.slice(0, endLineIndex + 1).join('\n') + '\n';
-  await writeFile(dest, truncated, 'utf-8');
+  const lines = await readLinesUpTo(src, endLineIndex);
+  await writeFile(dest, lines.join('\n') + '\n', 'utf-8');
+}
+
+/**
+ * Stream-read a JSONL file and return lines up to endLineIndex (inclusive).
+ */
+function readLinesUpTo(filePath: string, endLineIndex: number): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    const result: string[] = [];
+    let lineIndex = 0;
+
+    const rl = createInterface({
+      input: createReadStream(filePath, { encoding: 'utf-8' }),
+      crlfDelay: Infinity,
+    });
+
+    rl.on('line', (line) => {
+      if (!line.trim()) {
+        lineIndex++;
+        return;
+      }
+      if (lineIndex <= endLineIndex) {
+        result.push(line);
+      }
+      if (lineIndex >= endLineIndex) {
+        rl.close();
+      }
+      lineIndex++;
+    });
+
+    rl.on('close', () => resolve(result));
+    rl.on('error', reject);
+  });
 }

@@ -1,7 +1,7 @@
 import { Bot, Context, InputFile, InlineKeyboard } from 'grammy';
 import { readdir, readFile, stat } from 'fs/promises';
 import { homedir } from 'os';
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import { basename, dirname } from 'path';
 import { randomUUID } from 'crypto';
@@ -32,8 +32,85 @@ interface SessionTracking {
   inPlanMode: boolean;
 }
 
+interface SnapshotResult {
+  state: 'waiting' | 'working' | 'idle' | 'error';
+  summary: string;
+  detail: string;
+}
+
+function analyzeScreenWithClaude(screen: string): Promise<SnapshotResult> {
+  const screenSlice = screen.slice(-3000);
+  const prompt = `以下のClaude Codeターミナル画面を分析してJSONのみ返してください。コードブロック・説明不要、JSONのみ。
+
+<screen>
+${screenSlice}
+</screen>
+
+次のJSONを返してください:
+{"state":"...","summary":"...","detail":"..."}
+
+state:
+- waiting = Yes/No/選択肢ダイアログが表示中（ユーザー操作待ち）
+- working = ファイル編集・ツール実行・API呼び出し中
+- idle = 入力プロンプトが表示、次のユーザー入力待ち
+- error = エラー・クラッシュ・予期しない状態
+
+summary: 15文字以内の状態説明
+detail: 40文字以内の詳細`;
+
+  return new Promise<SnapshotResult>((resolve) => {
+    let proc: ReturnType<typeof spawn> | null = null;
+
+    const timer = setTimeout(() => {
+      proc?.kill();
+      resolve({ state: 'error', summary: '分析タイムアウト', detail: '30秒経過' });
+    }, 30000);
+
+    proc = spawn('claude', ['-p', prompt], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    proc.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
+
+    proc.on('close', () => {
+      clearTimeout(timer);
+      try {
+        const clean = stdout.trim()
+          .replace(/^```(?:json)?\s*/i, '')
+          .replace(/\s*```\s*$/, '');
+        const parsed = JSON.parse(clean);
+        const validStates = ['waiting', 'working', 'idle', 'error'] as const;
+        const state: SnapshotResult['state'] = validStates.includes(parsed.state) ? parsed.state : 'idle';
+        resolve({
+          state,
+          summary: String(parsed.summary || '状態不明').slice(0, 20),
+          detail: String(parsed.detail || '').slice(0, 50),
+        });
+      } catch {
+        resolve({ state: 'idle', summary: '分析失敗', detail: stdout.slice(0, 50) });
+      }
+    });
+
+    proc.on('error', (err: Error) => {
+      clearTimeout(timer);
+      resolve({ state: 'error', summary: 'Claude CLI起動失敗', detail: err.message.slice(0, 50) });
+    });
+  });
+}
+
 export function createTelegramApp(config: TelegramConfig) {
   const bot = new Bot(config.botToken);
+
+  // Catch all handler errors so they don't crash bot.start() (grammY default rethrows)
+  bot.catch((err) => {
+    try {
+      const updateId = err.ctx?.update?.update_id ?? 'unknown';
+      console.error(`[Telegram] Handler error (update_id=${updateId}):`, err.error);
+    } catch {
+      console.error('[Telegram] Handler error (failed to report details)');
+    }
+  });
 
   const activeSessions = new Map<string, SessionTracking>();
   const telegramSentMessages = new Set<string>();
@@ -47,6 +124,7 @@ export function createTelegramApp(config: TelegramConfig) {
   const MESSAGE_BUFFER_SIZE = 10;
   let currentSessionId: string | null = null; // Explicitly selected session
   let userExplicitlySelected = false; // True after user has explicitly switched to a session
+  let lastExplicitProjectName: string | null = null; // Project name of last explicit /switch
   let primarySessionId: string | null = null; // First session started (Heartbeat/Cron target)
   let pendingSwitchProject: string | null = null; // Project name awaiting session start
   let verboseMode = false; // Show tool calls/results in Telegram
@@ -178,6 +256,12 @@ export function createTelegramApp(config: TelegramConfig) {
         pendingSwitchProject = null;
       }
 
+      // Auto-restore currentSessionId when explicitly-selected project reconnects after restart
+      if (!currentSessionId && userExplicitlySelected && lastExplicitProjectName
+          && projectName === lastExplicitProjectName) {
+        currentSessionId = session.id;
+      }
+
       // Handle pending fork
       if (pendingForkInfo) {
         const forkInfo: ForkInfo = { ...pendingForkInfo, forkSessionId: session.id };
@@ -248,6 +332,7 @@ export function createTelegramApp(config: TelegramConfig) {
       // If current session ended, clear it (and no auto-return happened)
       if (currentSessionId === sessionId) {
         currentSessionId = null;
+        userExplicitlySelected = false;
       }
 
       const list = await buildProjectList();
@@ -518,7 +603,7 @@ export function createTelegramApp(config: TelegramConfig) {
         extraArgs += ' --continue';
       }
       const escapedDir = dir.replace(/'/g, "'\\''");
-      const cmd = `unset CLAUDECODE; cd '${escapedDir}' && (source ~/.nvm/nvm.sh 2>/dev/null || true) && afk-code run --restart -- claude --dangerously-skip-permissions${extraArgs}`;
+      const cmd = `unset CLAUDECODE; cd '${escapedDir}' && (source ~/.nvm/nvm.sh 2>/dev/null || true) && CLAUDE_HOOK_TELEGRAM=1 afk-code run --restart -- claude --dangerously-skip-permissions${extraArgs}`;
       const escapedCmd = cmd.replace(/'/g, "'\\''");
       await execAsync(`tmux new-window -t afk -n '${name}' '${escapedCmd}'`);
       return { ok: true };
@@ -563,6 +648,7 @@ export function createTelegramApp(config: TelegramConfig) {
       if (session) return session;
       // Session ended, clear selection
       currentSessionId = null;
+      userExplicitlySelected = false;
     }
 
     // Auto-select if only one session
@@ -740,7 +826,7 @@ export function createTelegramApp(config: TelegramConfig) {
     if (ctx.chat?.id.toString() !== config.chatId) return;
 
     const data = ctx.callbackQuery.data;
-    await ctx.answerCallbackQuery();
+    try { await ctx.answerCallbackQuery(); } catch { /* query may be too old after bot restart */ }
 
     // rewind_select_N → show confirmation
     if (data.startsWith('rewind_select_')) {
@@ -913,9 +999,9 @@ export function createTelegramApp(config: TelegramConfig) {
         3: '✅ Manual approve',
       };
       // Interactive prompt uses arrow keys: option 1 is already selected (❯),
-      // so send (choice-1) Down arrows followed by Enter
+      // so send (choice-1) Down arrows followed by Enter (\r)
       const downArrow = '\x1b[B';
-      const input = downArrow.repeat(choice - 1) + '\n';
+      const input = downArrow.repeat(choice - 1) + '\r';
       waitingForPlanAction.delete(sessionId);
       const sent = sessionManager.sendInput(sessionId, input);
       await ctx.reply(sent ? `${labels[choice] || `Option ${choice}`}` : 'Failed - session not connected.');
@@ -934,12 +1020,26 @@ export function createTelegramApp(config: TelegramConfig) {
         3: '❌ No',
       };
       // Permission prompt: option 1 (Yes) is already selected (❯),
-      // so send (choice-1) Down arrows followed by Enter
+      // so send (choice-1) Down arrows followed by Enter (\r)
       const downArrow = '\x1b[B';
-      const input = downArrow.repeat(choice - 1) + '\n';
+      const input = downArrow.repeat(choice - 1) + '\r';
       waitingForPermission.delete(sessionId);
       const sent = sessionManager.sendInput(sessionId, input);
       await ctx.reply(sent ? `${labels[choice] || `Option ${choice}`}` : 'Failed - session not connected.');
+      return;
+    }
+
+    // snap_action_{sessionId}_{action} → snapshot result action button
+    if (data.startsWith('snap_action_')) {
+      const rest = data.replace('snap_action_', '');
+      const lastUnderscore = rest.lastIndexOf('_');
+      const sessionId = rest.substring(0, lastUnderscore);
+      const action = rest.substring(lastUnderscore + 1);
+      if (action === 'ctrlc') {
+        const sent = sessionManager.sendInput(sessionId, '\x03');
+        await ctx.reply(sent ? '⛔ Ctrl+C 送信' : '失敗 - セッションが接続されていません');
+      }
+      await ctx.answerCallbackQuery();
       return;
     }
 
@@ -960,6 +1060,67 @@ export function createTelegramApp(config: TelegramConfig) {
         const trimmed = screen.slice(-3000);
         await ctx.reply(`\`\`\`\n${trimmed}\n\`\`\``, { parse_mode: 'Markdown' });
         await ctx.answerCallbackQuery();
+        return;
+      }
+
+      // Snapshot analysis
+      if (data === 'key_snapshot') {
+        const current = getCurrentSession();
+        if (!current) {
+          await ctx.answerCallbackQuery({ text: 'No active session.' });
+          return;
+        }
+        await ctx.answerCallbackQuery();
+        const loadingMsg = await ctx.reply('⏳ スクリーン分析中...');
+        try {
+          const screen = await sessionManager.captureScreen(current.sessionId);
+          if (!screen) {
+            await bot.api.editMessageText(config.chatId, loadingMsg.message_id, '❌ 画面キャプチャ失敗');
+            return;
+          }
+          const result = await analyzeScreenWithClaude(screen);
+          const stateEmoji: Record<string, string> = {
+            waiting: '⏳', working: '🟢', idle: '💬', error: '⚠️',
+          };
+          const stateLabel: Record<string, string> = {
+            waiting: 'WAITING ダイアログ待機',
+            working: 'WORKING 処理中',
+            idle: 'IDLE 入力待ち',
+            error: 'ERROR エラー',
+          };
+          const emoji = stateEmoji[result.state] || '❓';
+          const label = stateLabel[result.state] || result.state.toUpperCase();
+          const textLines = [
+            `${emoji} *${escTg(current.projectName)}* | ${label}`,
+            `*${escTg(result.summary)}*`,
+          ];
+          if (result.detail) textLines.push(`_${escTg(result.detail)}_`);
+          const kb = new InlineKeyboard();
+          if (result.state === 'waiting') {
+            kb
+              .text('1️⃣ Yes', `perm_action_${current.sessionId}_1`)
+              .text('2️⃣ Yes+allow', `perm_action_${current.sessionId}_2`)
+              .text('3️⃣ No', `perm_action_${current.sessionId}_3`)
+              .row();
+          }
+          if (result.state === 'working' || result.state === 'error') {
+            kb.text('⛔ Ctrl+C', `snap_action_${current.sessionId}_ctrlc`).row();
+          }
+          kb.text('📷 最新画面', 'key_screen');
+          await bot.api.editMessageText(
+            config.chatId,
+            loadingMsg.message_id,
+            textLines.join('\n'),
+            { parse_mode: 'Markdown', reply_markup: kb }
+          );
+        } catch (err: any) {
+          await bot.api.editMessageText(
+            config.chatId,
+            loadingMsg.message_id,
+            `❌ エラー: ${escTg(err.message || String(err))}`,
+            { parse_mode: 'Markdown' }
+          );
+        }
         return;
       }
 
@@ -990,6 +1151,7 @@ export function createTelegramApp(config: TelegramConfig) {
       if (existing) {
         currentSessionId = existing.sessionId;
         userExplicitlySelected = true;
+        lastExplicitProjectName = existing.projectName;
         const list = await buildProjectList();
         await ctx.reply(`Switched to: *${existing.projectName}*\n\n${list}`, { parse_mode: 'Markdown' });
       } else {
@@ -1001,6 +1163,7 @@ export function createTelegramApp(config: TelegramConfig) {
         }
         await ensureTmuxSession();
         userExplicitlySelected = true;
+        lastExplicitProjectName = projectName;
         pendingSwitchProject = projectName;
         await ctx.reply(`Starting \`${projectName}\`... (continue)`, { parse_mode: 'Markdown' });
         const result = await createSessionInTmux(projectName, projectDir, { continueFlag: true });
@@ -1020,7 +1183,7 @@ export function createTelegramApp(config: TelegramConfig) {
         await ctx.reply('No active session.');
         return;
       }
-      const sent = sessionManager.sendInput(current.sessionId, `/model ${modelName}\n`);
+      const sent = sessionManager.sendInput(current.sessionId, `/model ${modelName}\r`);
       await ctx.reply(sent ? `Sent /model ${modelName}` : 'Failed - session not connected.');
       return;
     }
@@ -1057,10 +1220,10 @@ export function createTelegramApp(config: TelegramConfig) {
       waitingForPlanAction.delete(current.sessionId);
       const downArrow = '\x1b[B';
       // Select option 4 (3x Down + Enter), then type feedback after a short delay
-      const selectOption4 = downArrow.repeat(3) + '\n';
+      const selectOption4 = downArrow.repeat(3) + '\r';
       sessionManager.sendInput(current.sessionId, selectOption4);
       setTimeout(() => {
-        sessionManager.sendInput(current.sessionId, text + '\n');
+        sessionManager.sendInput(current.sessionId, text + '\r');
       }, 500);
       await ctx.reply('📝 Sending feedback...');
       return;
@@ -1068,10 +1231,16 @@ export function createTelegramApp(config: TelegramConfig) {
 
     telegramSentMessages.add(text.trim());
 
-    const sent = sessionManager.sendInput(current.sessionId, text);
+    // \r = Enter in PTY raw mode. Send a second \r after 1s in case
+    // Claude Code's input wasn't ready to receive the first one.
+    const sent = sessionManager.sendInput(current.sessionId, text + '\r');
     if (!sent) {
       telegramSentMessages.delete(text.trim());
       await ctx.reply('Failed to send input - session not connected.');
+    } else {
+      setTimeout(() => {
+        sessionManager.sendInput(current.sessionId, '\r');
+      }, 1000);
     }
   });
 
@@ -1140,6 +1309,7 @@ export function createTelegramApp(config: TelegramConfig) {
         if (existing) {
           currentSessionId = existing.sessionId;
           userExplicitlySelected = true;
+          lastExplicitProjectName = existing.projectName;
           const list = await buildProjectList();
           await ctx.reply(`Switched to: *${existing.projectName}*\n\n${list}`, { parse_mode: 'Markdown' });
           return;
@@ -1165,6 +1335,7 @@ export function createTelegramApp(config: TelegramConfig) {
         await ensureTmuxSession();
 
         userExplicitlySelected = true;
+        lastExplicitProjectName = projectName;
         pendingSwitchProject = projectName;
         await ctx.reply(`Starting \`${projectName}\`...${newFlag ? ' (new)' : ' (continue)'}`, { parse_mode: 'Markdown' });
         const result = await createSessionInTmux(projectName, projectDir, { continueFlag });
@@ -1187,11 +1358,14 @@ export function createTelegramApp(config: TelegramConfig) {
         let jsonlPath = sessionManager.getWatchedFile(targetSession.sessionId);
         if (!jsonlPath) {
           const withConv = await getSessionsWithConversation();
-          if (withConv.length === 0) {
+          const selfEntry = withConv.find(({ tracking }) => tracking.sessionId === targetSession!.sessionId);
+          if (selfEntry) {
+            // Filesystem fallback found the file for the requested session
+            jsonlPath = selfEntry.jsonlPath;
+          } else if (withConv.length === 0) {
             await ctx.reply('No conversations found in any session.');
             return;
-          }
-          if (withConv.length === 1) {
+          } else if (withConv.length === 1) {
             targetSession = withConv[0].tracking;
             jsonlPath = withConv[0].jsonlPath;
             await ctx.reply(`\`${targetSession.projectName}\` に自動切り替えました。`, { parse_mode: 'Markdown' });
@@ -1252,11 +1426,13 @@ export function createTelegramApp(config: TelegramConfig) {
         let jsonlPath = sessionManager.getWatchedFile(targetSession.sessionId);
         if (!jsonlPath) {
           const withConv = await getSessionsWithConversation();
-          if (withConv.length === 0) {
+          const selfEntry = withConv.find(({ tracking }) => tracking.sessionId === targetSession!.sessionId);
+          if (selfEntry) {
+            jsonlPath = selfEntry.jsonlPath;
+          } else if (withConv.length === 0) {
             await ctx.reply('No conversations found in any session.');
             return;
-          }
-          if (withConv.length === 1) {
+          } else if (withConv.length === 1) {
             targetSession = withConv[0].tracking;
             jsonlPath = withConv[0].jsonlPath;
             await ctx.reply(`\`${targetSession.projectName}\` に自動切り替えました。`, { parse_mode: 'Markdown' });
@@ -1338,7 +1514,7 @@ export function createTelegramApp(config: TelegramConfig) {
         const keyboard = new InlineKeyboard()
           .text('↑', 'key_up').row()
           .text('←', 'key_left').text('↓', 'key_down').text('→', 'key_right').row()
-          .text('ESC', 'key_esc').text('↵ Enter', 'key_enter').text('📷', 'key_screen');
+          .text('ESC', 'key_esc').text('↵ Enter', 'key_enter').text('📷', 'key_screen').text('🔍', 'key_snapshot');
         await ctx.reply('🎮 Key Input', { reply_markup: keyboard });
         break;
       }
@@ -1389,12 +1565,72 @@ export function createTelegramApp(config: TelegramConfig) {
         break;
       }
 
+      case '/sn':
+      case '/snapshot': {
+        if (!targetSession) {
+          await ctx.reply('No active session.');
+          return;
+        }
+        const snSession = targetSession;
+        const loadingMsg = await ctx.reply('⏳ スクリーン分析中...');
+        try {
+          const screen = await sessionManager.captureScreen(snSession.sessionId);
+          if (!screen) {
+            await bot.api.editMessageText(config.chatId, loadingMsg.message_id, '❌ 画面キャプチャ失敗');
+            break;
+          }
+          const result = await analyzeScreenWithClaude(screen);
+          const stateEmoji: Record<string, string> = {
+            waiting: '⏳', working: '🟢', idle: '💬', error: '⚠️',
+          };
+          const stateLabel: Record<string, string> = {
+            waiting: 'WAITING ダイアログ待機',
+            working: 'WORKING 処理中',
+            idle: 'IDLE 入力待ち',
+            error: 'ERROR エラー',
+          };
+          const emoji = stateEmoji[result.state] || '❓';
+          const label = stateLabel[result.state] || result.state.toUpperCase();
+          const textLines = [
+            `${emoji} *${escTg(snSession.projectName)}* | ${label}`,
+            `*${escTg(result.summary)}*`,
+          ];
+          if (result.detail) textLines.push(`_${escTg(result.detail)}_`);
+          const keyboard = new InlineKeyboard();
+          if (result.state === 'waiting') {
+            keyboard
+              .text('1️⃣ Yes', `perm_action_${snSession.sessionId}_1`)
+              .text('2️⃣ Yes+allow', `perm_action_${snSession.sessionId}_2`)
+              .text('3️⃣ No', `perm_action_${snSession.sessionId}_3`)
+              .row();
+          }
+          if (result.state === 'working' || result.state === 'error') {
+            keyboard.text('⛔ Ctrl+C', `snap_action_${snSession.sessionId}_ctrlc`).row();
+          }
+          keyboard.text('📷 最新画面', 'key_screen');
+          await bot.api.editMessageText(
+            config.chatId,
+            loadingMsg.message_id,
+            textLines.join('\n'),
+            { parse_mode: 'Markdown', reply_markup: keyboard }
+          );
+        } catch (err: any) {
+          await bot.api.editMessageText(
+            config.chatId,
+            loadingMsg.message_id,
+            `❌ エラー: ${escTg(err.message || String(err))}`,
+            { parse_mode: 'Markdown' }
+          );
+        }
+        break;
+      }
+
       case '/compact': {
         if (!targetSession) {
           await ctx.reply('No active session.');
           return;
         }
-        const sent = sessionManager.sendInput(targetSession.sessionId, '/compact\n');
+        const sent = sessionManager.sendInput(targetSession.sessionId, '/compact\r');
         await ctx.reply(sent ? 'Sent /compact' : 'Failed - session not connected.');
         break;
       }
@@ -1404,7 +1640,7 @@ export function createTelegramApp(config: TelegramConfig) {
           await ctx.reply('No active session.');
           return;
         }
-        const sent = sessionManager.sendInput(targetSession.sessionId, '/clear\n');
+        const sent = sessionManager.sendInput(targetSession.sessionId, '/clear\r');
         await ctx.reply(sent ? 'Sent /clear — context cleared.' : 'Failed - session not connected.');
         break;
       }
@@ -1423,7 +1659,7 @@ export function createTelegramApp(config: TelegramConfig) {
           await ctx.reply('Select model:', { reply_markup: keyboard });
           return;
         }
-        const sent = sessionManager.sendInput(targetSession.sessionId, `/model ${modelArg}\n`);
+        const sent = sessionManager.sendInput(targetSession.sessionId, `/model ${modelArg}\r`);
         await ctx.reply(sent ? `Sent /model ${modelArg}` : 'Failed - session not connected.');
         break;
       }
@@ -1586,6 +1822,7 @@ export function createTelegramApp(config: TelegramConfig) {
             `/rewind [project] - Rewind conversation\n` +
             `/fork (/f) [project] - Fork conversation\n` +
             `/model <name> - Switch model\n` +
+            `/snapshot (/sn) - AI状態分析（ダイアログ待ち？処理中？）\n` +
             `/compact - Compact conversation\n` +
             `/clear - Clear context completely\n` +
             `/background (/bg) - Send Ctrl+B\n` +
@@ -1615,28 +1852,38 @@ export function createTelegramApp(config: TelegramConfig) {
   }
 
   // Session stuck watchdog:
-  // True stuck = last JSONL message was role:user AND no assistant response for > threshold.
-  // role:assistant (or null) = idle/waiting → not stuck, ignore.
-  // When truly stuck, additionally compare screen captures:
+  // Case 1: last JSONL role=user, no assistant response for > threshold → Claude stuck mid-response
+  // Case 2: last JSONL role=assistant (or null) but no JSONL output for > threshold → stdin inputs
+  //         (HEARTBEATs/CRONs) are queued in PTY but Claude isn't flushing them (e.g. post-compaction)
+  // When truly stuck, compare screen captures:
   //   - Screen changed → processing (thinking etc.) → notify only
   //   - Screen unchanged → fully frozen → Ctrl+C once + notify
   const WATCHDOG_INTERVAL_MS = 10 * 60 * 1000; // check every 10 min
   const STALE_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
   let lastWatchdogScreen: string | null = null;
 
-  setInterval(async () => {
+  const watchdogInterval = setInterval(async () => {
     if (!primarySessionId || !activeSessions.has(primarySessionId)) return;
 
-    // Only trigger if the last JSONL message was from the user (Claude should be responding)
     const lastRole = sessionManager.getLastMessageRole(primarySessionId);
+    const lastOutput = sessionManager.getLastOutputTime(primarySessionId);
+    const outputStaleMs = Date.now() - lastOutput;
+
+    // Case 1: unanswered user message
+    // Case 2: role=assistant but JSONL has been silent for > threshold (stdin inputs not flushing)
     if (lastRole !== 'user') {
-      lastWatchdogScreen = null;
-      return;
+      if (lastOutput === 0 || outputStaleMs <= STALE_THRESHOLD_MS) {
+        lastWatchdogScreen = null;
+        return;
+      }
+      // Fall through: JSONL silent for > threshold despite role=assistant
     }
 
-    const lastUserTime = sessionManager.getLastUserMessageTime(primarySessionId);
-    const staleMs = Date.now() - lastUserTime;
-    if (lastUserTime > 0 && staleMs > STALE_THRESHOLD_MS) {
+    const refTime = lastRole === 'user'
+      ? sessionManager.getLastUserMessageTime(primarySessionId)
+      : lastOutput;
+    const staleMs = Date.now() - refTime;
+    if (refTime > 0 && staleMs > STALE_THRESHOLD_MS) {
       const staleMin = Math.round(staleMs / 60_000);
       const screen = await sessionManager.captureScreen(primarySessionId);
       const screenText = screen
@@ -1667,5 +1914,10 @@ export function createTelegramApp(config: TelegramConfig) {
     }
   }, WATCHDOG_INTERVAL_MS);
 
-  return { bot, sessionManager, scheduler };
+  return {
+    bot,
+    sessionManager,
+    scheduler,
+    stop: () => clearInterval(watchdogInterval),
+  };
 }

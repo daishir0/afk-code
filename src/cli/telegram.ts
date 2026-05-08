@@ -1,6 +1,7 @@
 import { homedir } from 'os';
 import { mkdir, writeFile, readFile, access } from 'fs/promises';
 import * as readline from 'readline';
+import { setupFileLogger } from '../utils/logger.js';
 
 const CONFIG_DIR = `${homedir()}/.afk-code`;
 const TELEGRAM_CONFIG_FILE = `${CONFIG_DIR}/telegram.env`;
@@ -107,6 +108,9 @@ async function loadEnvFile(path: string): Promise<Record<string, string>> {
 }
 
 export async function telegramRun(): Promise<void> {
+  // Set up file logging (idempotent — safe to call on each restart)
+  setupFileLogger();
+
   // Load config
   const globalConfig = await loadEnvFile(TELEGRAM_CONFIG_FILE);
   const localConfig = await loadEnvFile(`${process.cwd()}/.env`);
@@ -131,6 +135,16 @@ export async function telegramRun(): Promise<void> {
     process.exit(1);
   }
 
+  // Cancel any lingering long-poll connection from a previous run (e.g. after Mac sleep).
+  // Sending getUpdates?timeout=0 forces Telegram to resolve the old request immediately,
+  // so the next bot.start() won't get a 409 Conflict.
+  try {
+    await fetch(
+      `https://api.telegram.org/bot${config.TELEGRAM_BOT_TOKEN}/getUpdates?timeout=0`,
+    );
+    await new Promise<void>((r) => setTimeout(r, 1500));
+  } catch (_) {}
+
   console.log('[AFK Code] Starting Telegram bot...');
 
   // Import and create the Telegram app
@@ -141,14 +155,15 @@ export async function telegramRun(): Promise<void> {
     chatId: config.TELEGRAM_CHAT_ID,
   };
 
-  const { bot, sessionManager, scheduler } = createTelegramApp(telegramConfig);
+  const { bot, sessionManager, scheduler, stop: stopWatchdog } = createTelegramApp(telegramConfig);
 
   // Start session manager
   try {
     await sessionManager.start();
   } catch (err) {
     console.error('[AFK Code] Failed to start session manager:', err);
-    process.exit(1);
+    // Throw instead of process.exit so auto-restart loop can catch and retry
+    throw err;
   }
 
   // Start scheduler (Heartbeat + Cron)
@@ -159,25 +174,32 @@ export async function telegramRun(): Promise<void> {
     // Non-fatal - continue without scheduler
   }
 
-  // Cleanup on exit
-  process.on('SIGINT', () => {
+  // Signal handler: stop bot gracefully (don't call process.exit here - let auto-restart loop decide)
+  const onSignal = () => {
+    stopWatchdog();
     scheduler.stop();
     sessionManager.stop();
-    process.exit(0);
-  });
-  process.on('SIGTERM', () => {
-    scheduler.stop();
-    sessionManager.stop();
-    process.exit(0);
-  });
+    bot.stop();
+  };
+  process.once('SIGINT', onSignal);
+  process.once('SIGTERM', onSignal);
 
-  // Start bot
-  bot.start({
-    onStart: (botInfo) => {
-      console.log(`[AFK Code] Telegram bot @${botInfo.username} is running!`);
-      console.log('[AFK Code] Heartbeat + Cron scheduler active');
-      console.log('');
-      console.log('Start a Claude Code session with: afk-code run -- claude');
-    },
-  });
+  // Start bot (awaited so telegramRun() blocks until bot stops, enabling auto-restart)
+  try {
+    await bot.start({
+      onStart: (botInfo) => {
+        console.log(`[AFK Code] Telegram bot @${botInfo.username} is running!`);
+        console.log('[AFK Code] Heartbeat + Cron scheduler active');
+        console.log('');
+        console.log('Start a Claude Code session with: afk-code run -- claude');
+      },
+    });
+  } finally {
+    // Always clean up signal handlers and resources when bot stops
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
+    stopWatchdog();
+    scheduler.stop();
+    sessionManager.stop();
+  }
 }

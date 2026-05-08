@@ -70,11 +70,16 @@ function hash(data: string): string {
   return createHash('md5').update(data).digest('hex');
 }
 
+const MAX_SEEN_MESSAGES = 50_000; // ~1.6 MB of MD5 hashes; evict oldest on overflow
+const RELAY_CONFIG_TTL_MS = 60_000; // re-read config.yaml at most once per minute
+
 export class SessionManager {
   private sessions = new Map<string, InternalSession>();
   private claimedFiles = new Set<string>();
   private events: SessionEvents;
   private server: Server | null = null;
+  private relayConfigCache: import('../scheduler/config-loader.js').RelayConfig | null = null;
+  private relayConfigLastLoad = 0;
 
   constructor(events: SessionEvents) {
     this.events = events;
@@ -92,6 +97,12 @@ export class SessionManager {
 
       socket.on('data', (data) => {
         messageBuffer += data.toString();
+        // Guard against OOM: if a single line exceeds 50MB, drop it
+        if (messageBuffer.length > 50 * 1024 * 1024) {
+          console.error('[SessionManager] messageBuffer exceeded 50MB, dropping to prevent OOM');
+          messageBuffer = '';
+          return;
+        }
         const lines = messageBuffer.split('\n');
         messageBuffer = lines.pop() || '';
 
@@ -150,26 +161,16 @@ export class SessionManager {
       return false;
     }
 
-    // Send text first, then Enter
     try {
       session.socket.write(JSON.stringify({ type: 'input', text }) + '\n');
     } catch (err) {
       console.error(`[SessionManager] Failed to send input to ${sessionId}:`, err);
-      // Socket is dead, clean up
       this.stopWatching(session);
       this.sessions.delete(sessionId);
       Promise.resolve(this.events.onSessionEnd(sessionId))
         .catch(err => console.error('[SessionManager] onSessionEnd error:', err));
       return false;
     }
-
-    setTimeout(() => {
-      try {
-        session.socket.write(JSON.stringify({ type: 'input', text: '\r' }) + '\n');
-      } catch {
-        // Session likely already cleaned up from the first write failure
-      }
-    }, 50);
 
     return true;
   }
@@ -464,6 +465,10 @@ export class SessionManager {
         const lineHash = hash(line);
         if (session.seenMessages.has(lineHash)) continue;
         session.seenMessages.add(lineHash);
+        // Evict oldest entry to cap memory usage
+        if (session.seenMessages.size > MAX_SEEN_MESSAGES) {
+          session.seenMessages.delete(session.seenMessages.values().next().value);
+        }
 
         // Extract session name (slug)
         if (!session.slugFound) {
@@ -522,8 +527,8 @@ export class SessionManager {
           if (parsed.role === 'user') session.lastUserMessageTime = Date.now();
           console.log(`[SessionManager] New message: session=${session.id.slice(0, 8)} role=${parsed.role} ts=${parsed.timestamp} len=${parsed.content.length}`);
 
-          // Skip messages matching suppress rules (re-read config.yaml each time)
-          const relayConfig = await loadRelayConfig();
+          // Skip messages matching suppress rules (cached, reloaded every 60s)
+          const relayConfig = await this.getRelayConfig();
           if (parsed.role === 'user') {
             const contentKey = parsed.content.trim();
             const isSuppressed = relayConfig.suppressUserMessagePrefixes.some((prefix) =>
@@ -667,6 +672,16 @@ export class SessionManager {
         await this.processJsonlUpdates(session);
       }
     }, 1000);
+  }
+
+  private async getRelayConfig(): Promise<import('../scheduler/config-loader.js').RelayConfig> {
+    const now = Date.now();
+    if (this.relayConfigCache && now - this.relayConfigLastLoad < RELAY_CONFIG_TTL_MS) {
+      return this.relayConfigCache;
+    }
+    this.relayConfigCache = await loadRelayConfig();
+    this.relayConfigLastLoad = now;
+    return this.relayConfigCache;
   }
 
   private stopWatching(session: InternalSession): void {

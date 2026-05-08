@@ -77,7 +77,49 @@ async function main() {
       if (args[1] === 'setup') {
         await telegramSetup();
       } else {
-        await telegramRun();
+        // Auto-restart loop (like `run --restart`)
+        let stopRestart = false;
+
+        // SIGINT/SIGTERM: set flag so loop exits after current run finishes naturally
+        // (telegramRun now calls bot.stop() on signal, which makes await bot.start() resolve)
+        const onStop = () => { stopRestart = true; };
+        process.on('SIGINT', onStop);
+        process.on('SIGTERM', onStop);
+
+        let attempt = 0;
+        while (!stopRestart) {
+          attempt++;
+          const startTime = Date.now();
+          if (attempt > 1) {
+            console.log(`[AutoRestart] Restarting Telegram bot (attempt ${attempt})...`);
+          }
+          try {
+            await telegramRun();
+          } catch (err: any) {
+            console.error('[AutoRestart] Telegram bot crashed:', err?.message ?? err);
+          }
+          if (stopRestart) break;
+
+          const elapsed = Date.now() - startTime;
+          // If crashed very quickly (< 10s), wait longer before retry to avoid spam.
+          // 45s > Telegram's 30s long-poll timeout, ensuring the old connection expires.
+          const delay = elapsed < 10_000 ? 45_000 : 5_000;
+          console.log(`[AutoRestart] Telegram bot exited after ${Math.round(elapsed / 1000)}s. Restarting in ${delay / 1000}s...`);
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, delay);
+            // During sleep, signal should wake us up and stop
+            const onWake = () => { clearTimeout(timer); resolve(); };
+            process.once('SIGINT', onWake);
+            process.once('SIGTERM', onWake);
+            setTimeout(() => {
+              process.off('SIGINT', onWake);
+              process.off('SIGTERM', onWake);
+            }, delay);
+          });
+        }
+        process.off('SIGINT', onStop);
+        process.off('SIGTERM', onStop);
+        console.log('[AutoRestart] Telegram bot stopped.');
       }
       break;
     }

@@ -135,7 +135,7 @@ export class HeartbeatEngine {
     // Build and send heartbeat prompt
     const { prompt, header } = await this.buildHeartbeatPrompt(sessionId);
 
-    const sent = this.callbacks.sendInput(sessionId, prompt);
+    const sent = this.callbacks.sendInput(sessionId, prompt + '\r');
 
     if (sent) {
       this.state.beatCount++;

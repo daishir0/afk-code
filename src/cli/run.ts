@@ -23,12 +23,17 @@ const SCREEN_BUFFER_CHARS = 3000;
 let screenBuffer = '';
 
 // Permission prompt detection
+// NOTE: patterns are tested against the rolling screen buffer (not per-chunk),
+// so they match even when TUI output is split across multiple PTY data events.
 const PERMISSION_PATTERNS = [
   /Do you want to make this edit/,
   /Claude needs your permission/,
   /Do you want to proceed/,
   /Do you want to execute/,
   /Do you want to run/,
+  /Do you want to create/,
+  /which is a sensitive file/,
+  /Claude requested permissions/,
 ];
 let lastPermissionNotifyTime = 0;
 const PERMISSION_NOTIFY_COOLDOWN = 5000; // 5s cooldown to avoid spam
@@ -40,20 +45,22 @@ function appendToScreenBuffer(data: string): void {
   }
 }
 
-// Connect to daemon and maintain bidirectional communication
-function connectToDaemon(
+// Connect to daemon once (single attempt)
+function connectToDaemonOnce(
   sessionId: string,
   projectDir: string,
   cwd: string,
   command: string[],
-  onInput: (text: string) => void
+  onInput: (text: string) => void,
+  onDisconnect: () => void,
 ): Promise<{ close: () => void; socket: Socket } | null> {
   return new Promise((resolve) => {
     const socket = createConnection(DAEMON_SOCKET);
     let messageBuffer = '';
+    let resolved = false;
 
     socket.on('connect', () => {
-      // Tell daemon about this session
+      resolved = true;
       socket.write(JSON.stringify({
         type: 'session_start',
         id: sessionId,
@@ -74,7 +81,12 @@ function connectToDaemon(
 
     socket.on('data', (data) => {
       messageBuffer += data.toString();
-
+      // Guard against OOM: if a single line exceeds 50MB, drop it
+      if (messageBuffer.length > 50 * 1024 * 1024) {
+        console.error('[run] messageBuffer exceeded 50MB, dropping to prevent OOM');
+        messageBuffer = '';
+        return;
+      }
       const lines = messageBuffer.split('\n');
       messageBuffer = lines.pop() || '';
 
@@ -91,11 +103,50 @@ function connectToDaemon(
       }
     });
 
-    socket.on('error', (error) => {
-      // Daemon not running - that's okay, run without it
-      resolve(null);
+    socket.on('error', () => {
+      if (!resolved) resolve(null);
+    });
+
+    socket.on('close', () => {
+      if (resolved) onDisconnect();
     });
   });
+}
+
+// Connect to daemon with auto-reconnect. Returns a handle whose .current always points to the
+// active socket (or null when not connected), so callers don't need to track reconnections.
+function connectToDaemon(
+  sessionId: string,
+  projectDir: string,
+  cwd: string,
+  command: string[],
+  onInput: (text: string) => void,
+): { current: { socket: Socket } | null; close: () => void } {
+  const handle: { current: { socket: Socket } | null; close: () => void } = {
+    current: null,
+    close: () => { stopped = true; handle.current?.socket.destroy(); },
+  };
+  let stopped = false;
+
+  async function attempt() {
+    if (stopped) return;
+    const conn = await connectToDaemonOnce(sessionId, projectDir, cwd, command, onInput, () => {
+      handle.current = null;
+      if (!stopped) {
+        // Daemon disappeared - retry in 5s
+        setTimeout(attempt, 5000);
+      }
+    });
+    if (conn) {
+      handle.current = { socket: conn.socket };
+    } else if (!stopped) {
+      // Daemon not available yet - retry in 5s
+      setTimeout(attempt, 5000);
+    }
+  }
+
+  attempt();
+  return handle;
 }
 
 export async function run(command: string[]): Promise<void> {
@@ -132,7 +183,7 @@ export async function run(command: string[]): Promise<void> {
     env: process.env as Record<string, string>,
   });
 
-  const daemon = await connectToDaemon(
+  const daemon = connectToDaemon(
     sessionId,
     projectDir,
     cwd,
@@ -151,20 +202,21 @@ export async function run(command: string[]): Promise<void> {
     process.stdout.write(data);
     appendToScreenBuffer(data);
 
-    // Detect permission prompts and notify daemon
-    if (daemon) {
-      const stripped = stripAnsi(data);
+    // Detect permission prompts and notify daemon.
+    // Test the recent screen buffer (not just the current chunk) because TUI apps
+    // write character-by-character, so the full prompt text spans multiple onData calls.
+    const conn = daemon.current;
+    if (conn) {
       const now = Date.now();
       if (now - lastPermissionNotifyTime > PERMISSION_NOTIFY_COOLDOWN) {
+        const recentBuffer = screenBuffer.slice(-500);
         for (const pattern of PERMISSION_PATTERNS) {
-          if (pattern.test(stripped)) {
-            // Extract recent context from screen buffer for the notification
-            const context = screenBuffer.slice(-500);
+          if (pattern.test(recentBuffer)) {
             try {
-              daemon.socket.write(JSON.stringify({
+              conn.socket.write(JSON.stringify({
                 type: 'permission_prompt',
                 sessionId,
-                content: context,
+                content: recentBuffer,
               }) + '\n');
             } catch {}
             lastPermissionNotifyTime = now;
@@ -195,7 +247,7 @@ export async function run(command: string[]): Promise<void> {
         process.stdin.unref();
       }
 
-      daemon?.close();
+      daemon.close();
       resolve();
     });
   });
