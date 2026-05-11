@@ -26,6 +26,7 @@ interface InternalSession extends SessionInfo {
   watcher?: FSWatcher;
   watchedFile?: string;
   seenMessages: Set<string>;
+  lastProcessedLineCount: number; // index into JSONL; only lines after this are processed
   slugFound: boolean;
   lastTodosHash: string;
   inPlanMode: boolean;
@@ -70,7 +71,6 @@ function hash(data: string): string {
   return createHash('md5').update(data).digest('hex');
 }
 
-const MAX_SEEN_MESSAGES = 50_000; // ~1.6 MB of MD5 hashes; evict oldest on overflow
 const RELAY_CONFIG_TTL_MS = 60_000; // re-read config.yaml at most once per minute
 
 export class SessionManager {
@@ -298,6 +298,7 @@ export class SessionManager {
           socket,
           status: 'running',
           seenMessages: new Set(),
+          lastProcessedLineCount: 0,
           startedAt: new Date(),
           slugFound: false,
           lastTodosHash: '',
@@ -445,10 +446,8 @@ export class SessionManager {
       const content = await readFile(session.watchedFile, 'utf-8');
       const lines = content.split('\n').filter(Boolean);
       session.seenMessages.clear();
-      for (const line of lines) {
-        session.seenMessages.add(hash(line));
-      }
-      console.log(`[SessionManager] Seeded seenMessages with ${lines.length} lines from ${session.watchedFile}`);
+      session.lastProcessedLineCount = lines.length;
+      console.log(`[SessionManager] Seeded ${lines.length} lines (skipping) from ${session.watchedFile}`);
     } catch (err) {
       console.error('[SessionManager] Error seeding seenMessages:', err);
     }
@@ -461,14 +460,22 @@ export class SessionManager {
       const content = await readFile(session.watchedFile, 'utf-8');
       const lines = content.split('\n').filter(Boolean);
 
-      for (const line of lines) {
+      // Handle file truncation (e.g., new session, file reset)
+      if (lines.length < session.lastProcessedLineCount) {
+        session.lastProcessedLineCount = 0;
+      }
+
+      // Advance the pointer synchronously before any await so that concurrent
+      // calls from both the watcher and the poll timer don't re-process the
+      // same lines.
+      const startIndex = session.lastProcessedLineCount;
+      session.lastProcessedLineCount = lines.length;
+
+      for (let i = startIndex; i < lines.length; i++) {
+        const line = lines[i];
         const lineHash = hash(line);
         if (session.seenMessages.has(lineHash)) continue;
         session.seenMessages.add(lineHash);
-        // Evict oldest entry to cap memory usage
-        if (session.seenMessages.size > MAX_SEEN_MESSAGES) {
-          session.seenMessages.delete(session.seenMessages.values().next().value);
-        }
 
         // Extract session name (slug)
         if (!session.slugFound) {

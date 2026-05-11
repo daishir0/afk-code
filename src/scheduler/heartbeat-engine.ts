@@ -92,11 +92,11 @@ export class HeartbeatEngine {
     const { start, end } = this.config.quiet_hours;
 
     if (start < end) {
-      // e.g., 23:00-7:00 wraps around midnight
-      return hour >= start || hour < end;
-    } else {
-      // e.g., 1:00-6:00 (no wrap)
+      // No midnight wrap: e.g., 1:00-6:00
       return hour >= start && hour < end;
+    } else {
+      // Wraps around midnight: e.g., 23:00-7:00
+      return hour >= start || hour < end;
     }
   }
 
@@ -142,6 +142,9 @@ export class HeartbeatEngine {
       this.state.lastBeatTime = new Date().toISOString();
       this.state.consecutiveSkips = 0;
       console.log(`[Heartbeat] Beat #${this.state.beatCount} sent`);
+      // Send a second \r after 1s in case Claude Code's input wasn't ready
+      // to receive the first one (same pattern as telegram-app.ts).
+      setTimeout(() => this.callbacks.sendInput(sessionId, '\r'), 1000);
     } else {
       console.log('[Heartbeat] Failed to send beat');
       this.state.consecutiveSkips++;

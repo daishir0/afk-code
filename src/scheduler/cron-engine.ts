@@ -154,6 +154,9 @@ export class CronEngine {
 
     if (sent) {
       console.log(`[Cron] Executed job '${config.name}'`);
+      // Send a second \r after 1s in case Claude Code's input wasn't ready
+      // to receive the first one (same pattern as telegram-app.ts).
+      setTimeout(() => this.callbacks.sendInput(sessionId, '\r'), 1000);
     } else {
       console.log(`[Cron] Failed to execute job '${config.name}'`);
       this.callbacks.notify(`Cron: Failed to execute '${config.name}' - session not connected`);
