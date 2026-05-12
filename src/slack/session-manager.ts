@@ -147,6 +147,10 @@ export class SessionManager {
   stop(): void {
     for (const session of this.sessions.values()) {
       this.stopWatching(session);
+      // Destroy the socket so the run process detects the disconnect and
+      // reconnects to the new server instance (server.close() alone does not
+      // close accepted connections, leaving run processes orphaned).
+      try { session.socket.destroy(); } catch {}
     }
     this.sessions.clear();
     if (this.server) {
