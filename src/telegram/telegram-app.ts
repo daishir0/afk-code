@@ -106,7 +106,12 @@ export function createTelegramApp(config: TelegramConfig) {
   bot.catch((err) => {
     try {
       const updateId = err.ctx?.update?.update_id ?? 'unknown';
-      console.error(`[Telegram] Handler error (update_id=${updateId}):`, err.error);
+      const inner = err.error;
+      const msg = inner instanceof Error ? inner.message : String(inner);
+      const stack = inner instanceof Error ? inner.stack : undefined;
+      const is409 = msg.includes('409');
+      console.error(`[Telegram] Handler error (update_id=${updateId}): ${msg}${is409 ? ' [409 long-poll conflict]' : ''}`);
+      if (stack) console.error(`[Telegram] Stack: ${stack}`);
     } catch {
       console.error('[Telegram] Handler error (failed to report details)');
     }
@@ -174,8 +179,12 @@ export function createTelegramApp(config: TelegramConfig) {
         try {
           await fn();
           console.log(`[Telegram] Message sent (queue remaining: ${messageQueue.length})`);
-        } catch (err) {
-          console.error('[Telegram] Error sending message:', err);
+        } catch (err: any) {
+          const msg = err?.message ?? String(err);
+          const is429 = msg.includes('429');
+          const is403 = msg.includes('403');
+          console.error(`[Telegram] Error sending message: ${msg}${is429 ? ' [rate limited]' : ''}${is403 ? ' [forbidden]' : ''}`);
+          if (err?.stack) console.error(`[Telegram] Stack: ${err.stack}`);
         }
         if (messageQueue.length > 0) {
           await new Promise((r) => setTimeout(r, 100));
@@ -191,6 +200,8 @@ export function createTelegramApp(config: TelegramConfig) {
     parseMode: 'Markdown' | 'HTML' | undefined = 'Markdown',
     options?: { disable_notification?: boolean; reply_markup?: any }
   ) {
+    const preview = text.slice(0, 60).replace(/\n/g, '↵');
+    console.log(`[Telegram] Queuing message (${text.length} chars): "${preview}${text.length > 60 ? '…' : ''}"`);
     messageQueue.push(async () => {
       try {
         await bot.api.sendMessage(config.chatId, text, {
@@ -201,6 +212,7 @@ export function createTelegramApp(config: TelegramConfig) {
       } catch (err: any) {
         // If markdown fails, try without formatting
         if (parseMode && err.message?.includes('parse')) {
+          console.warn(`[Telegram] Markdown parse error, retrying without formatting: ${err.message}`);
           await bot.api.sendMessage(config.chatId, text, {
             disable_notification: options?.disable_notification,
             reply_markup: options?.reply_markup,

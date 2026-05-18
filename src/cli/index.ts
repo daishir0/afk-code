@@ -93,17 +93,20 @@ async function main() {
           if (attempt > 1) {
             console.log(`[AutoRestart] Restarting Telegram bot (attempt ${attempt})...`);
           }
+          let lastErrMsg = '';
           try {
             await telegramRun();
           } catch (err: any) {
-            console.error('[AutoRestart] Telegram bot crashed:', err?.message ?? err);
+            lastErrMsg = err?.message ?? String(err);
+            console.error('[AutoRestart] Telegram bot crashed:', lastErrMsg);
           }
           if (stopRestart) break;
 
           const elapsed = Date.now() - startTime;
-          // If crashed very quickly (< 10s), wait longer before retry to avoid spam.
-          // 45s > Telegram's 30s long-poll timeout, ensuring the old connection expires.
-          const delay = elapsed < 10_000 ? 45_000 : 5_000;
+          // Always wait 45s after a 409 so Telegram's long-poll (30s timeout)
+          // can expire before we retry. Also wait 45s for any crash within 10s
+          // (fast crash = likely startup conflict). Otherwise 5s is enough.
+          const delay = (lastErrMsg.includes('409') || elapsed < 10_000) ? 45_000 : 5_000;
           console.log(`[AutoRestart] Telegram bot exited after ${Math.round(elapsed / 1000)}s. Restarting in ${delay / 1000}s...`);
           await new Promise<void>((resolve) => {
             const timer = setTimeout(resolve, delay);

@@ -138,12 +138,22 @@ export async function telegramRun(): Promise<void> {
   // Cancel any lingering long-poll connection from a previous run (e.g. after Mac sleep).
   // Sending getUpdates?timeout=0 forces Telegram to resolve the old request immediately,
   // so the next bot.start() won't get a 409 Conflict.
+  console.log('[AFK Code] Cancelling any lingering Telegram long-poll (getUpdates?timeout=0)...');
   try {
-    await fetch(
+    const cancelRes = await fetch(
       `https://api.telegram.org/bot${config.TELEGRAM_BOT_TOKEN}/getUpdates?timeout=0`,
     );
-    await new Promise<void>((r) => setTimeout(r, 1500));
-  } catch (_) {}
+    console.log(`[AFK Code] Long-poll cancel response: HTTP ${cancelRes.status}`);
+    const WAIT_MS = 35000;
+    const STEP_MS = 5000;
+    console.log(`[AFK Code] Waiting ${WAIT_MS / 1000}s for Telegram to release the connection...`);
+    for (let elapsed = STEP_MS; elapsed <= WAIT_MS; elapsed += STEP_MS) {
+      await new Promise<void>((r) => setTimeout(r, STEP_MS));
+      console.log(`[AFK Code] Connection wait: ${elapsed / 1000}/${WAIT_MS / 1000}s`);
+    }
+  } catch (err: any) {
+    console.warn(`[AFK Code] Long-poll cancel failed (continuing anyway): ${err?.message ?? err}`);
+  }
 
   console.log('[AFK Code] Starting Telegram bot...');
 
@@ -158,17 +168,20 @@ export async function telegramRun(): Promise<void> {
   const { bot, sessionManager, scheduler, stop: stopWatchdog } = createTelegramApp(telegramConfig);
 
   // Start session manager
+  console.log('[AFK Code] Starting session manager...');
   try {
     await sessionManager.start();
+    console.log('[AFK Code] Session manager started');
   } catch (err) {
     console.error('[AFK Code] Failed to start session manager:', err);
-    // Throw instead of process.exit so auto-restart loop can catch and retry
     throw err;
   }
 
   // Start scheduler (Heartbeat + Cron)
+  console.log('[AFK Code] Starting scheduler (Heartbeat + Cron)...');
   try {
     await scheduler.start();
+    console.log('[AFK Code] Scheduler started');
   } catch (err) {
     console.error('[AFK Code] Failed to start scheduler:', err);
     // Non-fatal - continue without scheduler
@@ -185,6 +198,7 @@ export async function telegramRun(): Promise<void> {
   process.once('SIGTERM', onSignal);
 
   // Start bot (awaited so telegramRun() blocks until bot stops, enabling auto-restart)
+  console.log('[AFK Code] Calling bot.start()...');
   try {
     await bot.start({
       onStart: (botInfo) => {
@@ -194,12 +208,24 @@ export async function telegramRun(): Promise<void> {
         console.log('Start a Claude Code session with: afk-code run -- claude');
       },
     });
+    console.log('[AFK Code] bot.start() resolved (bot stopped normally)');
+  } catch (err: any) {
+    const msg = err?.message ?? String(err);
+    const is409 = msg.includes('409');
+    console.error(`[AFK Code] bot.start() threw: ${msg}${is409 ? ' [409 long-poll conflict]' : ''}`);
+    throw err;
   } finally {
-    // Always clean up signal handlers and resources when bot stops
+    console.log('[AFK Code] Cleaning up signal handlers and resources...');
     process.off('SIGINT', onSignal);
     process.off('SIGTERM', onSignal);
     stopWatchdog();
     scheduler.stop();
     sessionManager.stop();
+    try {
+      await bot.stop();
+      console.log('[AFK Code] bot.stop() completed');
+    } catch (err: any) {
+      console.warn(`[AFK Code] bot.stop() error (non-fatal): ${err?.message ?? err}`);
+    }
   }
 }
