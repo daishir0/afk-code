@@ -1,3 +1,5 @@
+local_timezone_offset: 9   # UTC+N の N（日本: 9、UTC: 0）
+
 relay:
   # userロールのメッセージがこのプレフィックスで始まる場合は全中継先にスキップ
   # Claude Codeが自動注入するシステムメッセージなどを抑制するために使用

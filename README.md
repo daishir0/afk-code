@@ -231,6 +231,40 @@ jobs:
 
 ---
 
+## 会話ログスクリプト（`scripts/log_conversation.py`）
+
+Claude Code の会話を日次ノートに自動追記するスクリプトです。Heartbeat に組み込むことでセッションをまたいだ会話履歴の記録が可能になります。
+
+**セットアップ（2ステップ）:**
+
+① `~/.claude/env.yaml` に追加:
+```yaml
+local_timezone_offset: 9   # UTC+N の N（日本: 9）
+```
+
+② `~/.claude/lib/load_env.sh` に追加（`OUTPUT_DIR` 設定の直後など）:
+```bash
+export LOCAL_TIMEZONE_OFFSET=$(get_yaml_value "local_timezone_offset")
+[ -z "$LOCAL_TIMEZONE_OFFSET" ] && export LOCAL_TIMEZONE_OFFSET="9"
+```
+
+**HEARTBEAT.md への組み込み例:**
+```markdown
+## 毎回確認
+- [ ] 会話ログを日次ノートに追記
+  （run_python ~/.afk-code/scripts/log_conversation.py）
+```
+
+**仕様:**
+- `~/.claude/projects/` 配下の全プロジェクトをスキャン
+- 前回記録以降の新着のみ抽出（重複なし）
+- JST 日付ごとに `~/.afk-code/memory/YYYY-MM-DD.md` へ追記
+- `[HEARTBEAT`・`[CRON:` 等のシステムメッセージは自動フィルタ
+
+> `load_env.sh` は `~/.claude` リポジトリ（afk-code とは別管理）の変更です。`~/.claude` を git 管理している場合は別途コミットしてください。
+
+---
+
 ## リレーフィルター
 
 Claude Code が自動注入するシステムメッセージや、チャットに流したくないプロンプトを抑制できます。
@@ -802,6 +836,40 @@ jobs:
 | `cron.yaml` | Cron job definitions (hot reload) |
 | `config.yaml` | Relay filters to suppress noise |
 | `memory/YYYY-MM-DD.md` | Daily activity log (auto-generated) |
+
+---
+
+## Conversation Log Script (`scripts/log_conversation.py`)
+
+Automatically appends Claude Code conversations to daily notes. Integrate it into Heartbeat to maintain a cross-session conversation history.
+
+**Setup (2 steps):**
+
+① Add to `~/.claude/env.yaml`:
+```yaml
+local_timezone_offset: 9   # N for UTC+N (Japan: 9)
+```
+
+② Add to `~/.claude/lib/load_env.sh` (right after the `OUTPUT_DIR` block):
+```bash
+export LOCAL_TIMEZONE_OFFSET=$(get_yaml_value "local_timezone_offset")
+[ -z "$LOCAL_TIMEZONE_OFFSET" ] && export LOCAL_TIMEZONE_OFFSET="9"
+```
+
+**Example HEARTBEAT.md integration:**
+```markdown
+## Every check
+- [ ] Append conversation log to daily note
+  (run_python ~/.afk-code/scripts/log_conversation.py)
+```
+
+**Features:**
+- Scans all projects under `~/.claude/projects/`
+- Extracts only new entries since the last run (no duplicates)
+- Appends to `~/.afk-code/memory/YYYY-MM-DD.md` per local date
+- Auto-filters system messages: `[HEARTBEAT`, `[CRON:`, etc.
+
+> `load_env.sh` lives in the `~/.claude` repository, which is managed separately from afk-code. If you version-control `~/.claude`, commit that change there.
 
 ---
 
