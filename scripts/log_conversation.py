@@ -62,8 +62,13 @@ def should_skip(text: str) -> bool:
 
 
 def collect_messages(since_dt: datetime) -> list:
-    """全プロジェクトから since_dt より新しいメッセージを収集"""
+    """全プロジェクトから since_dt より新しいメッセージを収集
+
+    セッションをresumeすると履歴が元のタイムスタンプのまま新しい.jsonlに
+    コピーされるため、uuid（なければ proj+timestamp+text）で重複排除する。
+    """
     messages = []
+    seen: set = set()
     if not os.path.isdir(PROJECTS_DIR):
         return messages
 
@@ -88,6 +93,10 @@ def collect_messages(since_dt: datetime) -> list:
                             text = extract_text(d["message"].get("content", "")).strip()
                             if not text or should_skip(text):
                                 continue
+                            dedup_key = d.get("uuid") or (proj, d.get("timestamp", ""), text)
+                            if dedup_key in seen:
+                                continue
+                            seen.add(dedup_key)
                             proj_label = (
                                 proj.replace("-Users-pathfinder-aibot-", "~/").replace("-", "/", 1)
                                 if proj.startswith("-Users") else proj
