@@ -2,8 +2,16 @@ import { randomUUID } from 'crypto';
 import { homedir } from 'os';
 import { createConnection, type Socket } from 'net';
 import * as pty from 'node-pty';
+import { SessionWatcher } from '../agent/jsonl-watcher.js';
+import { RemoteWsSink } from '../agent/remote-sink.js';
 
 const DAEMON_SOCKET = '/tmp/afk-code-daemon.sock';
+
+export interface RunOptions {
+  server?: string; // afk-server URL; when set, also stream to afk-server
+  apiKey?: string;
+  hostId?: string;
+}
 
 // Get Claude's project directory for the current working directory
 function getClaudeProjectDir(cwd: string): string {
@@ -149,10 +157,19 @@ function connectToDaemon(
   return handle;
 }
 
-export async function run(command: string[]): Promise<void> {
-  const sessionId = randomUUID().slice(0, 8);
+export async function run(command: string[], options: RunOptions = {}): Promise<void> {
+  // Deterministic session suffix when spawned by the host agent (stable across
+  // --restart); random otherwise.
+  const sessionId = process.env.AFK_SESSION_ID || randomUUID().slice(0, 8);
   const cwd = process.cwd();
   const projectDir = getClaudeProjectDir(cwd);
+
+  // Optional: stream this session to afk-server over an outbound WebSocket.
+  // This runs alongside the Unix-socket daemon (Telegram) so both work.
+  const hostId = options.hostId || process.env.AFK_HOST_ID || 'host';
+  const remoteSessionId = `${hostId}-${sessionId}`;
+  let remoteSink: RemoteWsSink | null = null;
+  let watcher: SessionWatcher | null = null;
 
   // Show loading spinner while starting
   const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -193,6 +210,30 @@ export async function run(command: string[]): Promise<void> {
     }
   );
 
+  if (options.server && options.apiKey) {
+    remoteSink = new RemoteWsSink({
+      serverUrl: options.server,
+      apiKey: options.apiKey,
+      hostId,
+      hostName: process.env.AFK_HOST_NAME,
+      sessionId: remoteSessionId,
+      sessionMeta: { projectDir, cwd, command: command.join(' '), name: command.join(' ') },
+      onInput: (text) => ptyProcess.write(text),
+      onScreenRequest: () => remoteSink?.emit('screen_response', { content: screenBuffer }),
+    });
+    remoteSink.start();
+
+    watcher = new SessionWatcher(projectDir, new Date(), {
+      onSessionUpdate: (name) => remoteSink?.emit('session_update', { name }),
+      onTodos: (todos) => remoteSink?.emit('todos', { todos }),
+      onPlanModeChange: (inPlanMode) => remoteSink?.emit('plan_mode', { inPlanMode }),
+      onToolCall: (tool) => remoteSink?.emit('tool_call', { tool }),
+      onToolResult: (result) => remoteSink?.emit('tool_result', { result }),
+      onMessage: (role, content) => remoteSink?.emit('message', { role, content }),
+    });
+    watcher.start().catch((e) => console.error('[run] watcher start error', e));
+  }
+
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);
   }
@@ -219,6 +260,20 @@ export async function run(command: string[]): Promise<void> {
                 content: recentBuffer,
               }) + '\n');
             } catch {}
+            remoteSink?.emit('permission_prompt', { content: recentBuffer });
+            lastPermissionNotifyTime = now;
+            break;
+          }
+        }
+      }
+    } else if (remoteSink) {
+      // No local daemon, but still detect permission prompts for the remote sink.
+      const now = Date.now();
+      if (now - lastPermissionNotifyTime > PERMISSION_NOTIFY_COOLDOWN) {
+        const recentBuffer = screenBuffer.slice(-500);
+        for (const pattern of PERMISSION_PATTERNS) {
+          if (pattern.test(recentBuffer)) {
+            remoteSink.emit('permission_prompt', { content: recentBuffer });
             lastPermissionNotifyTime = now;
             break;
           }
@@ -248,6 +303,8 @@ export async function run(command: string[]): Promise<void> {
       }
 
       daemon.close();
+      watcher?.stop();
+      remoteSink?.close();
       resolve();
     });
   });

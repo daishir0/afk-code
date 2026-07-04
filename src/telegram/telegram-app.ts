@@ -633,12 +633,23 @@ export function createTelegramApp(config: TelegramConfig) {
     return `${indicator} _Claude Code (${name}):_`;
   }
 
+  // 他セッションの「最近のやりとり」を文脈添付する際、最終メッセージから
+  // この時間以上経過したアイドルセッションは古い文脈なので除外する。
+  const OTHER_SESSION_IDLE_EXCLUDE_MS = 6 * 60 * 60 * 1000; // 6時間
+
   function getOtherSessionsSummary(excludeSessionId: string): string {
     const summaries: string[] = [];
     for (const [sessionId, messages] of sessionMessageBuffers.entries()) {
       if (sessionId === excludeSessionId || messages.length === 0) continue;
       const tracking = activeSessions.get(sessionId);
       if (!tracking) continue;
+      // アイドルセッション(最終メッセージから一定時間経過)は、毎回同じ古い
+      // 会話が添付され続けるのを防ぐため除外する。
+      const lastTs = messages[messages.length - 1].timestamp;
+      if (lastTs instanceof Date &&
+          (Date.now() - lastTs.getTime()) > OTHER_SESSION_IDLE_EXCLUDE_MS) {
+        continue;
+      }
       const projectName = tracking.projectName;
       const recent = messages.slice(-5).map(m => {
         const role = m.role === 'user' ? 'User' : 'Claude';

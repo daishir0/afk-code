@@ -1,5 +1,11 @@
 import { run } from './run.js';
+import { runAgent } from '../agent/host-agent.js';
 import { slackSetup, slackRun } from './slack.js';
+
+function flagValue(flags: string[], name: string): string | undefined {
+  const i = flags.indexOf(name);
+  return i >= 0 && i + 1 < flags.length ? flags[i + 1] : undefined;
+}
 import { discordSetup, discordRun } from './discord.js';
 import { telegramSetup, telegramRun } from './telegram.js';
 import { initFiles } from './init.js';
@@ -20,6 +26,11 @@ async function main() {
       }
       const runFlags = args.slice(1, separatorIndex);
       const shouldRestart = runFlags.includes('--restart');
+      const runOptions = {
+        server: flagValue(runFlags, '--server') ?? process.env.AFK_SERVER_URL,
+        apiKey: flagValue(runFlags, '--api-key') ?? process.env.AFK_API_KEY,
+        hostId: flagValue(runFlags, '--host-id') ?? process.env.AFK_HOST_ID,
+      };
       const cmd = args.slice(separatorIndex + 1);
       if (cmd.length === 0) {
         console.error('No command specified after --');
@@ -36,7 +47,7 @@ async function main() {
           attempt++;
           const startTime = Date.now();
           console.log(`[AutoRestart] Starting session (attempt ${attempt})...`);
-          await run(cmd);
+          await run(cmd, runOptions);
           if (stopRestart) break;
 
           const elapsed = Date.now() - startTime;
@@ -50,8 +61,20 @@ async function main() {
         }
         console.log('[AutoRestart] Stopped.');
       } else {
-        await run(cmd);
+        await run(cmd, runOptions);
       }
+      break;
+    }
+
+    case 'agent': {
+      const agentFlags = args.slice(1);
+      const server = flagValue(agentFlags, '--server') ?? process.env.AFK_SERVER_URL;
+      const apiKey = flagValue(agentFlags, '--api-key') ?? process.env.AFK_API_KEY;
+      if (!server || !apiKey) {
+        console.error('Usage: afk-code agent --server <url> --api-key <key>');
+        process.exit(1);
+      }
+      await runAgent({ server, apiKey });
       break;
     }
 
