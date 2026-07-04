@@ -5,7 +5,7 @@ import { homedir, hostname } from 'os';
 import { randomUUID } from 'crypto';
 import { readFile, readdir, stat, writeFile, mkdir } from 'fs/promises';
 import { createWriteStream } from 'fs';
-import { join } from 'path';
+import { join, basename } from 'path';
 import { parse as parseYaml } from 'yaml';
 import { parseJsonlTurns, backupJsonl, truncateJsonlToLine, copyJsonlTruncated } from '../telegram/jsonl-parser.js';
 
@@ -51,6 +51,19 @@ async function loadProjects(): Promise<Projects> {
 
 function claudeProjectDir(cwd: string): string {
   return `${homedir()}/.claude/projects/${cwd.replace(/[/._]/g, '-')}`;
+}
+
+async function waitForClaudeReady(window: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const { stdout } = await execAsync(`tmux capture-pane -t afk:'${window}' -p`);
+      if (stdout.includes('bypass permissions') || stdout.includes('for shortcuts')) return;
+    } catch {
+      /* window may not be ready */
+    }
+    await new Promise((r) => setTimeout(r, 1500));
+  }
 }
 
 async function findActiveJsonl(cwd: string): Promise<string | null> {
@@ -187,8 +200,15 @@ export async function runAgent(options: AgentOptions): Promise<void> {
           const prompt = String(p.prompt ?? '');
           const marker = String(p.marker ?? '');
           const full = `${prompt}\n\n【完了したら必ず最後に「${marker}」と、結果の要約に続けて出力してください。】`;
+          // Wait until Claude's TUI is ready (prompt box), so keystrokes aren't
+          // swallowed during boot, then type the text and submit separately.
+          await waitForClaudeReady(target, 20000);
           const escaped = full.replace(/'/g, "'\\''");
-          await execAsync(`tmux send-keys -t afk:'${target}' '${escaped}' Enter`).catch((e) => console.error('[agent] send-keys', e));
+          await execAsync(`tmux send-keys -t afk:'${target}' -l '${escaped}'`).catch((e) => console.error('[agent] send-keys text', e));
+          await new Promise((r) => setTimeout(r, 800));
+          await execAsync(`tmux send-keys -t afk:'${target}' Enter`).catch((e) => console.error('[agent] send-keys enter', e));
+          await new Promise((r) => setTimeout(r, 800));
+          await execAsync(`tmux send-keys -t afk:'${target}' Enter`).catch(() => {});
         }
         break;
       }
@@ -196,7 +216,9 @@ export async function runAgent(options: AgentOptions): Promise<void> {
         const transferId = String(p.transferId);
         const s = p.sessionId ? sessions.get(String(p.sessionId)) : undefined;
         const destDir = String(p.destPath ?? s?.cwd ?? process.cwd());
-        const dest = join(destDir, String(p.filename ?? transferId));
+        // Sanitize: never let a wire-supplied filename escape destDir (path traversal).
+        const safeName = basename(String(p.filename ?? transferId)) || transferId;
+        const dest = join(destDir, safeName);
         downloads.set(transferId, createWriteStream(dest));
         break;
       }
